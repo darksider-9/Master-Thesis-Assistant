@@ -1,0 +1,8 @@
+{
+  "name": "AI Master Thesis Assistant",
+  "description": "A sophisticated AI-powered platform for structuring and writing master's theses with automated formatting, term checking, reference management, and figure/table generation based on uploaded Word XML templates.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
