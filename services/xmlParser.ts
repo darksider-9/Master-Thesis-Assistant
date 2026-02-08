@@ -823,7 +823,7 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
     if (!body) throw new Error("Format Error: No body found");
 
     const stylesPart = getPkgPart(doc, "/word/styles.xml");
-    const stylesRoot = getPartXmlRoot(stylesPart) : null;
+    const stylesRoot = stylesPart ? getPartXmlRoot(stylesPart) : null;
     const headingStyles = stylesRoot ? buildHeadingStyles(stylesRoot) : {
         1: rules.styleIds.heading1, 2: rules.styleIds.heading2, 3: rules.styleIds.heading3
     };
@@ -959,7 +959,6 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
 };
 
 export const parseWordXML = (xmlString: string): FormatRules => {
-    // ... [No changes needed to parsing logic] ...
     const parser = new DOMParser();
     const doc = parser.parseFromString(xmlString, "text/xml");
     if (doc.documentElement.localName !== "package" && doc.documentElement.nodeName !== "pkg:package") {
