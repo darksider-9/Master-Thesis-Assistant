@@ -7,9 +7,10 @@ interface SidebarProps {
   setCurrentStep: (step: Step) => void;
   onSaveProject?: () => void;
   onLoadProject?: (file: File) => void;
+  onOpenSettings: () => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ currentStep, setCurrentStep, onSaveProject, onLoadProject }) => {
+const Sidebar: React.FC<SidebarProps> = ({ currentStep, setCurrentStep, onSaveProject, onLoadProject, onOpenSettings }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const steps: { id: Step; label: string; icon: string }[] = [
@@ -80,14 +81,16 @@ const Sidebar: React.FC<SidebarProps> = ({ currentStep, setCurrentStep, onSavePr
       </div>
 
       <div className="mt-auto p-6 border-t border-slate-800">
-        <div className="text-xs text-slate-500 mb-2">导师模式</div>
-        <div className="flex items-center gap-3 p-3 bg-slate-800 rounded-lg">
-          <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs">AI</div>
-          <div>
-            <div className="text-xs font-bold text-white">智慧导师 Agent</div>
-            <div className="text-[10px] text-slate-400">已就绪</div>
-          </div>
-        </div>
+        <button 
+            onClick={onOpenSettings}
+            className="flex items-center gap-3 p-3 bg-slate-800 hover:bg-slate-700 w-full rounded-lg transition-colors group mb-2"
+        >
+            <div className="w-8 h-8 rounded-full bg-slate-700 group-hover:bg-blue-600 flex items-center justify-center text-white text-xs transition-colors">⚙️</div>
+            <div className="text-left">
+                <div className="text-xs font-bold text-white">模型 API 设置</div>
+                <div className="text-[10px] text-slate-400">配置 Key & URL</div>
+            </div>
+        </button>
       </div>
     </aside>
   );

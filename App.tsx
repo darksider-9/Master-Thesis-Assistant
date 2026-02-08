@@ -1,6 +1,6 @@
 
-import React, { useState } from 'react';
-import { Step, FormatRules, ThesisStructure, Chapter, Reference, ProjectState } from './types';
+import React, { useState, useEffect } from 'react';
+import { Step, FormatRules, ThesisStructure, Chapter, Reference, ProjectState, ApiSettings } from './types';
 import { parseWordXML, generateThesisXML } from './services/xmlParser';
 import Sidebar from './components/Sidebar';
 import FormatAnalyzer from './components/FormatAnalyzer';
@@ -9,6 +9,7 @@ import MethodologyDiscussion from './components/MethodologyDiscussion';
 import WritingDashboard from './components/WritingDashboard';
 import Previewer from './components/Previewer';
 import TitleConfirm from './components/TitleConfirm';
+import ApiSettingsModal from './components/ApiSettingsModal';
 
 const App: React.FC = () => {
   const [currentStep, setCurrentStep] = useState<Step>('upload');
@@ -19,26 +20,103 @@ const App: React.FC = () => {
   });
   const [references, setReferences] = useState<Reference[]>([]);
 
+  // API Settings State
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [apiSettings, setApiSettings] = useState<ApiSettings>(() => {
+    // Load from localStorage or default env
+    const saved = localStorage.getItem('thesis_api_settings');
+    let defaultKey = "";
+    try {
+      // Safely check for process.env in case it's not polyfilled
+      if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
+        defaultKey = process.env.API_KEY;
+      }
+    } catch (e) {
+      // Ignore reference errors
+    }
+
+    return saved ? JSON.parse(saved) : {
+      apiKey: defaultKey,
+      baseUrl: "",
+      modelName: "gemini-3-pro-preview"
+    };
+  });
+
+  // Prompt for settings if key is missing
+  useEffect(() => {
+    if (!apiSettings.apiKey) {
+      setIsSettingsOpen(true);
+    }
+  }, []);
+
+  const handleSaveSettings = (newSettings: ApiSettings) => {
+    setApiSettings(newSettings);
+    localStorage.setItem('thesis_api_settings', JSON.stringify(newSettings));
+  };
+
   const handleFileUpload = (xmlContent: string) => {
-    const rules = parseWordXML(xmlContent);
-    setFormatRules(rules);
-    setCurrentStep('title'); // Move to Title Confirmation after upload
+    try {
+      const rules = parseWordXML(xmlContent);
+      setFormatRules(rules);
+    } catch (e) {
+      alert("解析 XML 失败，请检查文件格式。");
+      console.error(e);
+    }
   };
 
   const handleTitleConfirm = (title: string) => {
     setThesis(prev => ({ ...prev, title }));
-    setCurrentStep('structure'); // Move to Structure Planning after title is confirmed
+    setCurrentStep('structure'); 
+  };
+
+  // Critical: This function is called when Structure is Confirmed in Stage 3.
+  // It patches the XML with the new titles and "pending" placeholders immediately.
+  const handleStructureUpdate = async (newThesis: ThesisStructure) => {
+      if (!formatRules) return;
+      
+      try {
+          // 1. Generate new XML with modified structure and placeholders
+          const newXml = generateThesisXML(newThesis, formatRules, references);
+          
+          // 2. Re-parse this new XML to update the application state
+          // This ensures the next steps (Writing) are working on the MODIFIED document structure.
+          const newRules = parseWordXML(newXml);
+          
+          // 3. Update State
+          setFormatRules(newRules);
+          setThesis(newThesis);
+          
+          // 4. Move to next step
+          setCurrentStep('discussion');
+          
+      } catch (e) {
+          console.error("Structure Update Failed", e);
+          alert("模版结构同步失败，请检查控制台");
+      }
   };
 
   const handleExportXML = () => {
-    if (!formatRules) return;
-    const xml = generateThesisXML(thesis, formatRules, references);
-    const blob = new Blob([xml], { type: 'text/xml' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${thesis.title || 'thesis'}_draft.xml`;
-    a.click();
+    if (!formatRules) {
+      alert("请先上传模版文件！");
+      return;
+    }
+    
+    try {
+      const xml = generateThesisXML(thesis, formatRules, references);
+      const blob = new Blob([xml], { type: 'text/xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${thesis.title || 'thesis'}_draft.xml`;
+      // Append to body is required for Firefox
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("Export Error:", e);
+      alert(`导出 XML 失败: ${e instanceof Error ? e.message : '未知错误'}\n请检查控制台获取详情。`);
+    }
   };
 
   // --- Project Persistence ---
@@ -49,7 +127,8 @@ const App: React.FC = () => {
       step: currentStep,
       thesis,
       formatRules,
-      references
+      references,
+      apiSettings // Save API settings with project
     };
     const json = JSON.stringify(state, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
@@ -57,7 +136,10 @@ const App: React.FC = () => {
     const a = document.createElement('a');
     a.href = url;
     a.download = `thesis_project_${Date.now()}.json`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const handleLoadProject = (file: File) => {
@@ -72,6 +154,12 @@ const App: React.FC = () => {
         if (state.formatRules) setFormatRules(state.formatRules);
         if (state.references) setReferences(state.references);
         if (state.step) setCurrentStep(state.step);
+        
+        // Restore API Settings if they exist in the file
+        if (state.apiSettings) {
+           setApiSettings(state.apiSettings);
+           localStorage.setItem('thesis_api_settings', JSON.stringify(state.apiSettings));
+        }
         
         alert("项目加载成功！");
       } catch (err) {
@@ -89,6 +177,14 @@ const App: React.FC = () => {
         setCurrentStep={setCurrentStep}
         onSaveProject={handleSaveProject}
         onLoadProject={handleLoadProject}
+        onOpenSettings={() => setIsSettingsOpen(true)}
+      />
+
+      <ApiSettingsModal 
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        settings={apiSettings}
+        onSave={handleSaveSettings}
       />
       
       <main className="flex-1 flex flex-col overflow-hidden relative">
@@ -109,12 +205,21 @@ const App: React.FC = () => {
             <div className="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded">
               {formatRules ? `模版: ${formatRules.fontMain} / ${formatRules.fontSizeNormal}` : "未加载模版"}
             </div>
+            {(!apiSettings.apiKey) && (
+                <div onClick={() => setIsSettingsOpen(true)} className="cursor-pointer text-xs bg-red-100 text-red-600 px-3 py-1 rounded animate-pulse font-bold">
+                    ⚠️ 未配置 API Key
+                </div>
+            )}
           </div>
         </header>
 
         <div className="flex-1 overflow-y-auto p-8">
           {currentStep === 'upload' && (
-            <FormatAnalyzer onUpload={handleFileUpload} />
+            <FormatAnalyzer 
+              onUpload={handleFileUpload} 
+              formatRules={formatRules}
+              onNext={() => setCurrentStep('title')}
+            />
           )}
 
           {currentStep === 'title' && (
@@ -127,8 +232,10 @@ const App: React.FC = () => {
           {currentStep === 'structure' && (
             <StructurePlanner 
               thesis={thesis} 
-              onConfirm={() => setCurrentStep('discussion')}
+              onStructureConfirmed={handleStructureUpdate}
               setThesis={setThesis}
+              apiSettings={apiSettings}
+              formatRules={formatRules}
             />
           )}
 
@@ -137,6 +244,7 @@ const App: React.FC = () => {
               thesis={thesis}
               setThesis={setThesis}
               onNext={() => setCurrentStep('writing')}
+              apiSettings={apiSettings}
             />
           )}
 
@@ -147,6 +255,7 @@ const App: React.FC = () => {
               formatRules={formatRules!}
               references={references}
               setReferences={setReferences}
+              apiSettings={apiSettings}
             />
           )}
 

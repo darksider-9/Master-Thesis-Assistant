@@ -1,7 +1,7 @@
 
-import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { ThesisStructure, Chapter, FormatRules, Reference, TechnicalTerm, AgentLog } from '../types';
-import { orchestrateChapterGeneration, repairChapterFormatting } from '../services/geminiService';
+import React, { useState, useRef, useEffect } from 'react';
+import { ThesisStructure, Chapter, FormatRules, Reference, AgentLog, ApiSettings } from '../types';
+import { writeSingleSection, runPostProcessingAgents } from '../services/geminiService';
 
 interface WritingDashboardProps {
   thesis: ThesisStructure;
@@ -9,29 +9,53 @@ interface WritingDashboardProps {
   formatRules: FormatRules;
   references: Reference[];
   setReferences: React.Dispatch<React.SetStateAction<Reference[]>>;
+  apiSettings: ApiSettings;
 }
 
-const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, formatRules, references, setReferences }) => {
-  // Filter only Level 1 chapters for selection
+// Helper to flatten the tree for the list view
+interface FlattenedNode {
+  chapter: Chapter;
+  parentId: string | null;
+  depth: number;
+  label: string; // "1", "1.1", "1.1.1"
+}
+
+const flattenChapters = (chapters: Chapter[], parentLabel: string = "", depth: number = 0): FlattenedNode[] => {
+  let nodes: FlattenedNode[] = [];
+  chapters.forEach((ch, idx) => {
+    // For L1 chapters, don't use the index in label if title already has it (handled by Supervisor)
+    // But for list consistency, we keep internal numbering.
+    const currentLabel = parentLabel ? `${parentLabel}.${idx + 1}` : `${idx + 1}`;
+    nodes.push({
+      chapter: ch,
+      parentId: null,
+      depth,
+      label: currentLabel
+    });
+    if (ch.subsections) {
+      nodes = [...nodes, ...flattenChapters(ch.subsections, currentLabel, depth + 1)];
+    }
+  });
+  return nodes;
+};
+
+const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, formatRules, references, setReferences, apiSettings }) => {
   const level1Chapters = thesis.chapters.filter(c => c.level === 1);
   const [selectedChapterId, setSelectedChapterId] = useState<string | null>(level1Chapters[0]?.id || null);
-  const [globalTerms, setGlobalTerms] = useState<TechnicalTerm[]>([]);
   const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
-  const [isFixing, setIsFixing] = useState(false);
-  const [targetWordCount, setTargetWordCount] = useState<number>(2000);
-  
-  const selectedChapter = thesis.chapters.find(c => c.id === selectedChapterId);
+  const [loadingNodes, setLoadingNodes] = useState<Record<string, boolean>>({});
+  const [isPostProcessing, setIsPostProcessing] = useState(false);
+  const [instructions, setInstructions] = useState<Record<string, string>>({}); 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
+  const selectedChapter = thesis.chapters.find(c => c.id === selectedChapterId);
+
+  // Flatten the selected chapter for the list view
+  const nodes = selectedChapter ? flattenChapters([selectedChapter], `${thesis.chapters.indexOf(selectedChapter) + 1}`) : [];
+  
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [agentLogs]);
-
-  useEffect(() => {
-    if (selectedChapter && !selectedChapter.content) {
-      setAgentLogs([]);
-    }
-  }, [selectedChapterId]);
 
   const addLog = (agent: AgentLog['agentName'], message: string, status: AgentLog['status'] = 'processing') => {
     setAgentLogs(prev => [...prev, {
@@ -43,167 +67,143 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
     }]);
   };
 
-  const handleStartWriting = async () => {
-    if (!selectedChapter) return;
-    
-    // Strict check: Must be discussed in Stage 4
-    if (selectedChapter.status !== 'discussed' && selectedChapter.status !== 'completed') {
-      alert("⚠️ 无法生成：请先回到「核心探讨」阶段，完成该章节的思路确认。");
-      return;
-    }
+  const updateNodeContent = (chapters: Chapter[], targetId: string, content: string): Chapter[] => {
+    return chapters.map(ch => {
+      if (ch.id === targetId) {
+        return { ...ch, content, status: 'completed' };
+      }
+      if (ch.subsections) {
+        return { ...ch, subsections: updateNodeContent(ch.subsections, targetId, content) };
+      }
+      return ch;
+    });
+  };
 
-    addLog('Supervisor', `加载章节《${selectedChapter.title}》...`, 'success');
-    addLog('Supervisor', `设定目标字数: ${targetWordCount}字`, 'processing');
-    addLog('Writer', '启动多 Agent 协同撰写 (按结构递归生成)...', 'processing');
+  const handleWriteSection = async (node: FlattenedNode) => {
+    if (!selectedChapter || !apiSettings.apiKey) {
+        alert("请检查 API Key 配置");
+        return;
+    }
+    
+    const nodeId = node.chapter.id;
+    setLoadingNodes(prev => ({ ...prev, [nodeId]: true }));
+    addLog('Writer', `正在撰写: ${node.label} ${node.chapter.title}...`, 'processing');
 
     try {
-      const result = await orchestrateChapterGeneration({
+      const userInstruction = instructions[nodeId] || "";
+      
+      const content = await writeSingleSection({
         thesisTitle: thesis.title,
-        chapter: selectedChapter,
-        interviewData: selectedChapter.metadata,
+        chapterLevel1: selectedChapter,
+        targetSection: node.chapter,
+        userInstructions: userInstruction,
         formatRules,
-        globalTerms,
         globalRefs: references,
-        targetWordCount,
-        onLog: (agent, msg) => addLog(agent, msg)
+        settings: apiSettings,
+        discussionHistory: selectedChapter.chatHistory // Inject context
       });
 
-      // Update content for the whole chapter node
-      const updateChapters = (chapters: Chapter[]): Chapter[] => {
-        return chapters.map(ch => {
-          if (ch.id === selectedChapterId) {
-            return {
-              ...ch,
-              content: result.content,
-              rawModelOutput: result.rawOutput, // SAVE THE RAW CACHE
-              status: 'completed',
-              targetWordCount: targetWordCount
-            };
-          }
-          return ch;
-        });
-      };
+      setThesis(prev => ({
+        ...prev,
+        chapters: updateNodeContent(prev.chapters, nodeId, content)
+      }));
 
-      setThesis(prev => ({ ...prev, chapters: updateChapters(prev.chapters) }));
-
-      if (result.newTerms.length > 0) setGlobalTerms(prev => [...prev, ...result.newTerms]);
-      
-      if (result.newRefs.length > 0) {
-        setReferences(prev => {
-          const nextId = prev.length + 1;
-          const mappedRefs = result.newRefs.map((r, i) => ({
-             ...r,
-             id: nextId + i
-          }));
-          return [...prev, ...mappedRefs];
-        });
-      }
-      
-      addLog('Writer', '✅ 章节撰写完成', 'success');
+      addLog('Writer', `✅ ${node.label} 撰写完成`, 'success');
 
     } catch (e) {
-      addLog('Writer', '❌ 错误: ' + e, 'warning');
+      addLog('Writer', `❌ ${node.label} 失败: ${e}`, 'warning');
       console.error(e);
+    } finally {
+      setLoadingNodes(prev => ({ ...prev, [nodeId]: false }));
     }
   };
 
-  const handleFixFormatting = async () => {
-    if (!selectedChapter?.rawModelOutput || isFixing) return;
+  const handleCompleteChapter = async () => {
+    if (!selectedChapter) return;
+    setIsPostProcessing(true);
+    addLog('Supervisor', '启动章节完成流程...', 'processing');
+
+    // 1. Gather all content
+    // Simplified: we concatenate content for processing context, but we will update node by node?
+    // Actually, post processing usually needs the whole text to check consistency.
+    // For now, we will perform a 'check' pass and update references globaly.
     
-    setIsFixing(true);
-    addLog('Fixer', '检测到格式异常，启动修复 Agent...', 'warning');
-    addLog('Fixer', '正在读取原始缓存数据...', 'processing');
+    const allContent = nodes.map(n => n.chapter.content || "").join("\n\n");
+    if (!allContent.trim()) {
+        addLog('Supervisor', '章节内容为空，无法处理', 'warning');
+        setIsPostProcessing(false);
+        return;
+    }
 
     try {
-      const fixedContent = await repairChapterFormatting(selectedChapter.rawModelOutput, formatRules);
-      
-      const updateChapters = (chapters: Chapter[]): Chapter[] => {
-        return chapters.map(ch => {
-          if (ch.id === selectedChapterId) {
-            return {
-              ...ch,
-              content: fixedContent // Update with repaired content
-            };
-          }
-          return ch;
-        });
-      };
-      
-      setThesis(prev => ({ ...prev, chapters: updateChapters(prev.chapters) }));
-      addLog('Fixer', '✅ 格式修复完成，内容已恢复', 'success');
+        addLog('Figure', '检查图表与公式格式...', 'processing');
+        addLog('TermChecker', '提取专业术语...', 'processing');
+        addLog('Reference', '整理参考文献...', 'processing');
+
+        const result = await runPostProcessingAgents(allContent, apiSettings);
+
+        // Update References
+        if (result.newReferences.length > 0) {
+            setReferences(prev => {
+                // simple dedup based on desc
+                const combined = [...prev, ...result.newReferences];
+                const unique = Array.from(new Map(combined.map(item => [item.description, item])).values());
+                // re-assign IDs based on order
+                return unique.map((r, i) => ({...r, id: i+1}));
+            });
+            addLog('Reference', `更新参考文献库: +${result.newReferences.length} 条`, 'success');
+        }
+
+        // Update Terms (Just logging for now, or store in Chapter metadata)
+        if (result.newTerms.length > 0) {
+            addLog('TermChecker', `发现新术语: ${result.newTerms.map(t=>t.term).join(', ')}`, 'success');
+        }
+
+        addLog('Fixer', '格式校验完成', 'success');
 
     } catch (e) {
-      addLog('Fixer', '❌ 修复失败: ' + e, 'warning');
+        addLog('Supervisor', `处理失败: ${e}`, 'warning');
     } finally {
-      setIsFixing(false);
+        setIsPostProcessing(false);
     }
   };
 
-  // --- Loss Detection Logic ---
-  const lossMetrics = useMemo(() => {
-    if (!selectedChapter?.content || !selectedChapter?.rawModelOutput) return null;
-
-    const rawClean = selectedChapter.rawModelOutput.replace(/<metadata>[\s\S]*?<\/metadata>/, '');
-    const rawTextLength = rawClean.replace(/<[^>]+>/g, '').replace(/\s/g, '').length;
-
-    const parts = selectedChapter.content.split(/(<[^>]+>.*?<\/[^>]+>|<[^>]+\/>)/g).filter(p => p.trim());
-    let renderedTextLength = 0;
-    
-    parts.forEach(part => {
-      const pMatch = part.match(/<p style="(.*?)">(.*?)<\/p>/);
-      if (pMatch) {
-        renderedTextLength += pMatch[2].replace(/\s/g, '').length;
-      }
-    });
-
-    const diff = rawTextLength - renderedTextLength;
-    
-    return {
-      diff,
-      rawLength: rawTextLength,
-      renderedLength: renderedTextLength,
-      hasSignificantLoss: diff > 100 // Threshold: > 100 characters missing
-    };
-  }, [selectedChapter?.content, selectedChapter?.rawModelOutput]);
-
+  const renderPreviewContent = (content: string) => {
+     if (!content) return null;
+     // Split by new placeholders [[FIG:...]] or [[TBL:...]]
+     return content.split(/(\[\[.*?\]\]|\n)/g)
+      .filter(p => p.trim())
+      .map((part, i) => {
+          if (part.startsWith("[[FIG:")) {
+             const desc = part.replace("[[FIG:", "").replace("]]", "");
+             return (
+               <div key={i} className="my-2 p-3 bg-blue-50 border border-blue-100 rounded text-center">
+                  <div className="w-20 h-20 bg-blue-200 mx-auto mb-2 flex items-center justify-center text-blue-400">IMG</div>
+                  <div className="text-xs font-bold text-blue-600">图 X-X: {desc}</div>
+               </div>
+             );
+          }
+          if (part.startsWith("[[TBL:")) {
+             const desc = part.replace("[[TBL:", "").replace("]]", "");
+             return (
+               <div key={i} className="my-2 p-3 bg-green-50 border border-green-100 rounded text-center">
+                  <div className="text-xs font-bold text-green-600 mb-1">表 X-X: {desc}</div>
+                  <div className="grid grid-cols-3 gap-1 opacity-50 text-[10px]">
+                     <div className="bg-green-200 h-4"></div><div className="bg-green-200 h-4"></div><div className="bg-green-200 h-4"></div>
+                     <div className="bg-white border h-4"></div><div className="bg-white border h-4"></div><div className="bg-white border h-4"></div>
+                  </div>
+               </div>
+             );
+          }
+          return <p key={i} className="text-sm text-slate-700 leading-relaxed mb-2 indent-8 text-justify">{part}</p>;
+      });
+  };
 
   if (!selectedChapter) return <div>请选择章节</div>;
 
-  const renderContent = (content: string) => {
-    const parts = content.split(/(<[^>]+>.*?<\/[^>]+>|<[^>]+\/>)/g).filter(p => p.trim());
-    return parts.map((part, i) => {
-      const pMatch = part.match(/<p style="(.*?)">(.*?)<\/p>/);
-      if (pMatch) {
-        const styleId = pMatch[1];
-        const text = pMatch[2];
-        let className = "mb-4 text-justify leading-relaxed ";
-        
-        // Map XML styles to visual classes
-        if (styleId === formatRules.styleMap.heading1) className += "text-2xl font-bold mt-8 mb-4 text-slate-900 border-b pb-2";
-        else if (styleId === formatRules.styleMap.heading2) className += "text-xl font-bold mt-6 mb-3 text-slate-800";
-        else if (styleId === formatRules.styleMap.heading3) className += "text-lg font-bold mt-4 mb-2 text-slate-700";
-        else if (styleId === formatRules.styleMap.captionFigure) className += "text-sm text-center text-slate-500 italic mt-2";
-        else if (styleId === formatRules.styleMap.captionTable) className += "text-sm text-center text-slate-500 italic mb-2 font-bold";
-        else className += "text-base text-slate-800 indent-8";
-        
-        return <div key={i} className={className}>{text}</div>;
-      }
-      if (part.includes("figure_placeholder")) {
-        const desc = part.match(/desc="(.*?)"/)?.[1] || "Image";
-        return (
-          <div key={i} className="my-6 border-2 border-dashed border-blue-200 bg-blue-50 p-6 rounded-xl flex flex-col items-center justify-center text-blue-400">
-            <span className="text-2xl mb-2">🖼️</span>
-            <span className="font-mono text-sm">{desc} (待生成)</span>
-          </div>
-        );
-      }
-      return null;
-    });
-  };
-
   return (
     <div className="flex h-full gap-4">
-      {/* Chapter Selector (Level 1 Only) */}
+      {/* Chapter Selector */}
       <div className="w-60 bg-white rounded-xl border shadow-sm flex flex-col overflow-hidden shrink-0">
         <div className="p-4 bg-slate-50 border-b font-bold text-slate-700">章节目录</div>
         <div className="flex-1 overflow-y-auto p-2 space-y-2">
@@ -219,10 +219,6 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                 >
                   <div className="flex items-center justify-between">
                     <span className="truncate font-medium">{ch.title}</span>
-                    <div className="flex gap-1">
-                      {ch.status === 'completed' && <span className="text-white text-xs bg-white/20 px-1.5 rounded">撰写完</span>}
-                      {ch.status === 'discussed' && selectedChapterId !== ch.id && <span className="text-xs bg-green-100 text-green-600 px-1.5 rounded">已探讨</span>}
-                    </div>
                   </div>
                 </button>
              </div>
@@ -233,90 +229,97 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col gap-4 min-w-0">
         <div className="h-14 bg-white rounded-xl border shadow-sm flex items-center px-6 justify-between shrink-0">
-          <h2 className="font-bold text-lg text-slate-800 truncate">{selectedChapter.title}</h2>
-          
-          <div className="flex items-center gap-4">
-             {/* Word Count Control */}
-             {!selectedChapter.content && (
-                <div className="flex items-center gap-2 bg-slate-100 px-3 py-1 rounded-lg">
-                   <span className="text-xs text-slate-500 font-bold">目标字数:</span>
-                   <input 
-                     type="number" 
-                     min={1000} 
-                     max={10000} 
-                     step={500}
-                     value={targetWordCount}
-                     onChange={(e) => setTargetWordCount(Number(e.target.value))}
-                     className="w-16 bg-transparent text-sm font-bold text-slate-700 outline-none text-right"
-                   />
-                </div>
-             )}
-
-            <div className="flex gap-2">
-              {!selectedChapter.content ? (
-                <button 
-                  onClick={handleStartWriting} 
-                  disabled={selectedChapter.status !== 'discussed'}
-                  className={`px-6 py-1.5 rounded-lg text-sm font-bold shadow-md transition-all flex items-center gap-2 ${
-                    selectedChapter.status === 'discussed' 
-                      ? 'bg-blue-600 text-white hover:bg-blue-700' 
-                      : 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                  }`}
-                >
-                  {selectedChapter.status !== 'discussed' ? '🔒 请先完成探讨' : '✨ 启动智能撰写'}
-                </button>
-              ) : (
-                <button onClick={handleStartWriting} className="text-blue-600 px-4 py-1.5 rounded-lg text-sm hover:bg-blue-50 border border-blue-200">
-                  🔄 重新生成本章
-                </button>
-              )}
-            </div>
+          <h2 className="font-bold text-lg text-slate-800 truncate">
+             智能撰写工作台 - {selectedChapter.title}
+          </h2>
+          <div className="flex items-center gap-3">
+             <div className="text-xs text-slate-500 bg-slate-100 px-3 py-1 rounded-full">
+                共 {nodes.length} 个写作单元
+             </div>
+             <button 
+                onClick={handleCompleteChapter}
+                disabled={isPostProcessing}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm flex items-center gap-2"
+             >
+                {isPostProcessing ? '处理中...' : '🎉 完成本章'}
+             </button>
           </div>
         </div>
 
-        <div className="flex-1 bg-white rounded-xl border shadow-sm overflow-hidden relative flex flex-col">
-            {/* Loss Warning Banner */}
-            {lossMetrics?.hasSignificantLoss && (
-               <div className="bg-orange-50 border-b border-orange-200 p-3 flex items-center justify-between animate-fade-in">
-                  <div className="flex items-center gap-3">
-                    <span className="text-xl">⚠️</span>
-                    <div>
-                      <div className="text-sm font-bold text-orange-800">检测到格式渲染异常</div>
-                      <div className="text-xs text-orange-600">
-                        原始回复长度: {lossMetrics.rawLength} | 当前渲染长度: {lossMetrics.renderedLength} (丢失 {lossMetrics.diff} 字符)
-                      </div>
-                    </div>
+        <div className="flex-1 bg-white rounded-xl border shadow-sm overflow-hidden flex flex-col">
+            <div className="flex-1 overflow-y-auto p-6 bg-slate-50 custom-scrollbar">
+               {selectedChapter.status === 'pending' ? (
+                  <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                     <span className="text-5xl mb-4 opacity-50">🔒</span>
+                     <p className="font-bold">该章节尚未解锁</p>
+                     <p className="text-sm mt-2">请先完成「核心探讨」步骤</p>
                   </div>
-                  <button 
-                    onClick={handleFixFormatting}
-                    disabled={isFixing}
-                    className="bg-orange-600 hover:bg-orange-700 text-white text-xs px-4 py-2 rounded-lg font-bold shadow-sm transition-all"
-                  >
-                    {isFixing ? '正在修复...' : '🔧 调用修复 Agent'}
-                  </button>
-               </div>
-            )}
+               ) : (
+                  <div className="space-y-6 max-w-4xl mx-auto">
+                    {nodes.map((node) => {
+                       const isGenerating = loadingNodes[node.chapter.id];
+                       const hasContent = !!node.chapter.content;
+                       
+                       return (
+                         <div key={node.chapter.id} className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden transition-all hover:shadow-md">
+                            {/* Node Header */}
+                            <div className="flex items-center justify-between p-4 bg-white border-b border-slate-50">
+                               <div className="flex items-center gap-3">
+                                  <span className={`font-mono text-sm font-bold ${
+                                     node.depth === 0 ? 'text-blue-600' : 'text-slate-500'
+                                  }`}>
+                                     {node.label}
+                                  </span>
+                                  <span className={`font-bold ${
+                                     node.depth === 0 ? 'text-lg text-slate-800' : 'text-base text-slate-700'
+                                  }`}>
+                                     {node.chapter.title}
+                                  </span>
+                                  {hasContent && <span className="text-xs bg-green-100 text-green-600 px-2 py-0.5 rounded-full font-bold">已生成</span>}
+                               </div>
+                               
+                               <div className="flex gap-2">
+                                  <button 
+                                     onClick={() => handleWriteSection(node)}
+                                     disabled={isGenerating}
+                                     className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors ${
+                                        hasContent 
+                                           ? 'bg-white border border-blue-200 text-blue-600 hover:bg-blue-50'
+                                           : 'bg-blue-600 text-white hover:bg-blue-700'
+                                     }`}
+                                  >
+                                     {isGenerating ? (
+                                        <span className="animate-spin">⏳</span>
+                                     ) : (
+                                        hasContent ? '🔄 重新撰写' : '✨ 智能撰写'
+                                     )}
+                                  </button>
+                               </div>
+                            </div>
 
-            <div className="flex-1 overflow-y-auto p-12 bg-white">
-               {selectedChapter.content ? renderContent(selectedChapter.content) : (
-                 <div className="h-full flex flex-col items-center justify-center text-slate-400">
-                   {selectedChapter.status === 'discussed' ? (
-                     <>
-                        <span className="text-5xl mb-4 text-green-500">✅</span>
-                        <p className="font-bold text-slate-700 text-lg">探讨已完成</p>
-                        <p className="text-sm mt-2 max-w-md text-center text-slate-500">
-                           AI 已掌握本章的{selectedChapter.metadata.isCoreChapter ? '核心方法与实验数据' : '写作思路'}。<br/>
-                           点击上方按钮即可开始自动撰写。
-                        </p>
-                     </>
-                   ) : (
-                     <>
-                        <span className="text-5xl mb-4 opacity-50">🔒</span>
-                        <p className="font-bold">该章节尚未解锁</p>
-                        <p className="text-sm mt-2 text-slate-400">请返回「核心探讨」步骤，与导师确认本章思路。</p>
-                     </>
-                   )}
-                 </div>
+                            {/* Instruction Input */}
+                            <div className="px-4 py-3 bg-slate-50/50 border-b border-slate-100 flex gap-2">
+                               <span className="text-xs font-bold text-slate-400 mt-2 shrink-0">指导意见:</span>
+                               <textarea 
+                                  className="w-full text-xs bg-transparent border border-transparent hover:border-slate-200 focus:border-blue-300 focus:bg-white rounded p-1.5 outline-none transition-all resize-none h-8 focus:h-20"
+                                  placeholder={`给AI下达指令...`}
+                                  value={instructions[node.chapter.id] || ""}
+                                  onChange={(e) => setInstructions(prev => ({...prev, [node.chapter.id]: e.target.value}))}
+                               />
+                            </div>
+
+                            {/* Preview Content */}
+                            {hasContent && (
+                               <div className="p-4 bg-white">
+                                  <div className="max-h-60 overflow-y-auto custom-scrollbar pr-2 border-l-2 border-slate-100 pl-4">
+                                     {renderPreviewContent(node.chapter.content || "")}
+                                  </div>
+                               </div>
+                            )}
+                         </div>
+                       );
+                    })}
+                  </div>
                )}
             </div>
         </div>
@@ -331,7 +334,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
           </div>
           <div className="flex-1 overflow-y-auto p-3 space-y-3 font-mono text-[10px]">
             {agentLogs.map((log) => (
-              <div key={log.id} className="border-l-2 border-slate-700 pl-2">
+              <div key={log.id} className="border-l-2 border-slate-700 pl-2 animate-fade-in">
                 <span className={`font-bold ${log.agentName === 'Fixer' ? 'text-orange-400' : 'text-blue-400'}`}>{log.agentName}</span>
                 <p className="text-slate-300 mt-0.5">{log.message}</p>
               </div>

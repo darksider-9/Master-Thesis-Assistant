@@ -1,15 +1,16 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { ThesisStructure, Chapter, ChatMessage, InterviewData } from '../types';
+import { ThesisStructure, Chapter, ChatMessage, ApiSettings } from '../types';
 import { chatWithMethodologySupervisor } from '../services/geminiService';
 
 interface MethodologyDiscussionProps {
   thesis: ThesisStructure;
   setThesis: React.Dispatch<React.SetStateAction<ThesisStructure>>;
   onNext: () => void;
+  apiSettings: ApiSettings;
 }
 
-const MethodologyDiscussion: React.FC<MethodologyDiscussionProps> = ({ thesis, setThesis, onNext }) => {
+const MethodologyDiscussion: React.FC<MethodologyDiscussionProps> = ({ thesis, setThesis, onNext, apiSettings }) => {
   const [selectedChapterId, setSelectedChapterId] = useState<string | null>(null);
   const [inputMessage, setInputMessage] = useState("");
   const [isTyping, setIsTyping] = useState(false);
@@ -64,6 +65,10 @@ const MethodologyDiscussion: React.FC<MethodologyDiscussionProps> = ({ thesis, s
 
   const handleSendMessage = async () => {
     if (!inputMessage.trim() || !selectedChapter) return;
+    if (!apiSettings.apiKey) {
+        alert("请先在设置中配置 API Key");
+        return;
+    }
 
     const userMsg: ChatMessage = {
       role: 'user',
@@ -81,7 +86,8 @@ const MethodologyDiscussion: React.FC<MethodologyDiscussionProps> = ({ thesis, s
     const result = await chatWithMethodologySupervisor(
       newHistory,
       thesis.title,
-      selectedChapter
+      selectedChapter,
+      apiSettings
     );
 
     setIsTyping(false);
@@ -112,6 +118,8 @@ const MethodologyDiscussion: React.FC<MethodologyDiscussionProps> = ({ thesis, s
     }));
   };
 
+  const isPassed = (ch: Chapter) => ch.status === 'discussed' || ch.status === 'completed';
+
   return (
     <div className="flex h-full gap-6 p-4">
       {/* Chapter List (Level 1 Only) */}
@@ -133,11 +141,11 @@ const MethodologyDiscussion: React.FC<MethodologyDiscussionProps> = ({ thesis, s
               >
                 <div className="flex items-center gap-3 overflow-hidden">
                   <div className={`w-3 h-3 rounded-full shrink-0 ${
-                    ch.status === 'discussed' ? 'bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.6)]' : 'bg-slate-200'
+                    isPassed(ch) ? 'bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.6)]' : 'bg-slate-200'
                   }`} />
                   <span className="truncate font-bold text-sm">{ch.title}</span>
                 </div>
-                {ch.status === 'discussed' && (
+                {isPassed(ch) && (
                   <span className={`text-xs px-2 py-0.5 rounded-full ${
                     selectedChapterId === ch.id ? 'bg-white/20 text-white' : 'bg-green-100 text-green-700'
                   }`}>
@@ -179,7 +187,7 @@ const MethodologyDiscussion: React.FC<MethodologyDiscussionProps> = ({ thesis, s
               <div>
                 <h2 className="font-bold text-slate-800 flex items-center gap-2">
                   {selectedChapter.title}
-                  {selectedChapter.status === 'discussed' && <span className="text-green-500 text-lg">✓</span>}
+                  {isPassed(selectedChapter) && <span className="text-green-500 text-lg">✓</span>}
                 </h2>
                 <div className="flex gap-2 text-xs text-slate-500 mt-1">
                   <span className="bg-slate-200 px-1.5 rounded">Level 1 章节</span>

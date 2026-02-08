@@ -1,21 +1,22 @@
 
-import { GoogleGenAI, Type } from "@google/genai";
-import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData } from "../types";
+import { GoogleGenAI } from "@google/genai";
+import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings } from "../types";
 
-const API_KEY = process.env.API_KEY || "";
-const ai = new GoogleGenAI({ apiKey: API_KEY });
-
-// --- Helpers ---
-const cleanJsonString = (str: string) => {
-  let cleaned = str.trim();
-  if (cleaned.startsWith("```json")) {
-    cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+// Helper to create a dynamic client based on settings
+const getClient = (settings: ApiSettings) => {
+  if (!settings.apiKey) {
+    throw new Error("请先在设置中配置 API Key");
   }
-  return cleaned;
+  
+  const config: any = { apiKey: settings.apiKey };
+  if (settings.baseUrl) {
+    config.baseUrl = settings.baseUrl;
+  }
+
+  return new GoogleGenAI(config);
 };
 
+// --- Helpers ---
 const cleanMarkdownArtifacts = (text: string) => {
   return text
     .replace(/\*\*(.*?)\*\*/g, '$1') 
@@ -28,8 +29,10 @@ const cleanMarkdownArtifacts = (text: string) => {
 export const chatWithSupervisor = async (
   history: ChatMessage[], 
   thesisTitle: string,
-  currentStructure: any
+  currentStructure: any,
+  settings: ApiSettings
 ): Promise<{ reply: string, updatedStructure?: any }> => {
+  const ai = getClient(settings);
   const historyText = history.map(h => `${h.role}: ${h.content}`).join("\n");
   const fewShotExample = `
 {
@@ -37,10 +40,10 @@ export const chatWithSupervisor = async (
   "updatedStructure": {
     "chapters": [
       {
-        "title": "绪论", 
+        "title": "第1章 绪论", 
         "level": 1,
         "subsections": [
-          { "title": "研究背景", "level": 2, "subsections": [] }
+          { "title": "1.1 研究背景", "level": 2, "subsections": [] }
         ]
       }
     ]
@@ -55,7 +58,9 @@ export const chatWithSupervisor = async (
     1. **必须**返回标准的 JSON 格式。
     2. 目标是确定完整大纲（5-7章），必须细化到 **三级标题**。
     3. 只有在用户明确同意或要求修改结构时，才在 \`updatedStructure\` 中返回完整的大纲树。
-    4. **【严禁编号】**: JSON中的 \`title\` 字段**绝对不要**包含 "第一章"、"1.1"、"3.2.1" 等序号。只返回纯标题文字。
+    4. **【标题格式要求】**: 
+       - 一级标题必须加前缀，格式为 "第X章 标题名" (例如: "第1章 绪论")
+       - 二级/三级标题请保留 "1.1", "1.1.1" 这样的序号前缀。
     
     【JSON 结构参考】
     ${fewShotExample}
@@ -65,16 +70,16 @@ export const chatWithSupervisor = async (
     请回复 JSON:
   `;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-pro-preview',
-    contents: systemPrompt,
-    config: { responseMimeType: "application/json" }
-  });
-
   try {
+    const response = await ai.models.generateContent({
+      model: settings.modelName,
+      contents: systemPrompt,
+      config: { responseMimeType: "application/json" }
+    });
     return JSON.parse(response.text || "{}");
   } catch (e) {
-    return { reply: "（系统提示：JSON解析失败，请重试）" };
+    console.error(e);
+    return { reply: `（系统提示：API调用失败 - ${e instanceof Error ? e.message : '未知错误'}）` };
   }
 };
 
@@ -82,8 +87,10 @@ export const chatWithSupervisor = async (
 export const chatWithMethodologySupervisor = async (
   history: ChatMessage[],
   thesisTitle: string,
-  chapter: Chapter
+  chapter: Chapter,
+  settings: ApiSettings
 ): Promise<{ reply: string, finalizedMetadata?: InterviewData }> => {
+  const ai = getClient(settings);
   const historyText = history.map(h => `${h.role}: ${h.content}`).join("\n");
   
   const getStructureText = (ch: Chapter, prefix = ""): string => {
@@ -129,164 +136,152 @@ export const chatWithMethodologySupervisor = async (
     ${historyText}
   `;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-pro-preview',
-    contents: systemPrompt,
-    config: { responseMimeType: "application/json" }
-  });
-
   try {
+    const response = await ai.models.generateContent({
+      model: settings.modelName,
+      contents: systemPrompt,
+      config: { responseMimeType: "application/json" }
+    });
     return JSON.parse(response.text || "{}");
   } catch (e) {
-    return { reply: "（请继续补充您的想法...）" };
+    console.error(e);
+    return { reply: `（API 错误: ${e instanceof Error ? e.message : '未知错误'}）` };
   }
 };
 
-// --- Agent Orchestrator (Chapter Writing) ---
+// --- Single Section Writer (Granular Control) ---
 
-interface OrchestrationContext {
+interface WriteSectionContext {
   thesisTitle: string;
-  chapter: Chapter;
-  interviewData: InterviewData;
+  chapterLevel1: Chapter; // Context: The main chapter this section belongs to
+  targetSection: Chapter; // The specific section (can be L1, L2, or L3) to write
+  userInstructions?: string; // Optional user feedback
   formatRules: FormatRules;
-  globalTerms: TechnicalTerm[];
   globalRefs: Reference[];
-  targetWordCount?: number;
-  onLog: (agent: any, msg: string) => void;
+  settings: ApiSettings;
+  discussionHistory?: ChatMessage[]; // New: discussion context
 }
 
-export const orchestrateChapterGeneration = async (ctx: OrchestrationContext) => {
-  const { chapter, interviewData, formatRules, onLog, targetWordCount = 2000 } = ctx;
-  const { styleMap } = formatRules;
+export const writeSingleSection = async (ctx: WriteSectionContext) => {
+  const { thesisTitle, chapterLevel1, targetSection, userInstructions, formatRules, settings, discussionHistory } = ctx;
+  const ai = getClient(settings);
 
-  onLog('Figure', `加载图表规划... (Figs: ${interviewData.figureCount})`);
-  onLog('Writer', `启动撰写... 目标字数: ${targetWordCount}`);
-  
-  const termList = ctx.globalTerms.map(t => `${t.term} (${t.fullName})`).join(", ");
-  const chapterIndex = chapter.id.split('-')[1] || "1";
+  const isLevel1 = targetSection.level === 1;
 
-  // Build a recursive JSON structure of the chapter specifically for the prompt
-  // to enforce structural adherence.
-  const buildStructureMap = (ch: Chapter): any => {
-    return {
-      title: ch.title,
-      level: ch.level,
-      subsections: ch.subsections?.map(buildStructureMap)
-    };
-  };
-  const structureMap = buildStructureMap(chapter);
-
-  const contentPrompt = `
-    角色：专业的学术论文撰写 Agent (严格模式)
-    任务：撰写章节《${chapter.title}》。
-    目标字数：**${targetWordCount}字以上** (必须严格达标)。
-    
-    【核心输入】
-    1. 论文题目：${ctx.thesisTitle}
-    2. 核心思路摘要（来自导师探讨）：${JSON.stringify(interviewData)}
-    3. **严格结构树**：${JSON.stringify(structureMap)}
-    
-    【撰写逻辑 - CRITICAL】
-    1. **按结构树遍历**：必须依次为结构树中的每个标题生成内容。
-    2. **处理层级间隙**：
-       - 如果二级标题 (Level 2) 下面紧接着有三级标题 (Level 3)，则二级标题只需写 100 字左右的简短引言，引导出三级标题。**核心内容写在三级标题下**。
-       - 绝对不要跳过任何一个定义的子章节。
-    3. **字数分配**：请自行估算，确保总字数达到 ${targetWordCount}。如果是核心章节，请详细展开算法公式推导和实验分析。
-    
-    【格式规范】
-    - 使用 <p style="${styleMap.heading1}">...</p> 等标签包裹标题。
-    - 使用 <p style="${styleMap.normal}">...</p> 包裹正文。
-    - **图表占位**：依据 metadata 中的 figurePlan/tablePlan，在合适位置插入 <figure_placeholder ... />。
-    - **参考文献**：使用 [i] 占位。
-    - **公式**：用文字描述公式逻辑。
-    - **严禁**：不要输出 Markdown，不要手动加序号 (如 1.1)。
-    
-    【输出示例】
-    <p style="${styleMap.heading1}">绪论</p>
-    <p style="${styleMap.normal}">...（约 200 字）...</p>
-    <p style="${styleMap.heading2}">研究背景</p>
-    <p style="${styleMap.normal}">...（约 800 字，详细阐述背景）...</p>
-    ...
-    
-    [JSON Metadata at the end]
-    <metadata>
-      { "new_terms": [], "new_refs": [] }
-    </metadata>
-  `;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-pro-preview',
-    contents: contentPrompt,
-  });
-
-  let rawText = response.text || "";
-  rawText = cleanMarkdownArtifacts(rawText);
-  
-  onLog('AutoNumber', '解析 XML 并校验格式...');
-  
-  const metadataMatch = rawText.match(/<metadata>([\s\S]*?)<\/metadata>/);
-  let newTerms: TechnicalTerm[] = [];
-  let newRefs: Reference[] = [];
-  let cleanContent = rawText;
-
-  if (metadataMatch) {
-    try {
-      const jsonStr = metadataMatch[1].trim();
-      const meta = JSON.parse(jsonStr);
-      if (meta.new_terms) newTerms = meta.new_terms;
-      if (meta.new_refs) newRefs = meta.new_refs;
-      cleanContent = rawText.replace(/<metadata>[\s\S]*?<\/metadata>/, '').trim();
-    } catch (e) {
-      console.warn("Metadata parsing failed", e);
-    }
+  // Compile discussion context
+  let discussionContextStr = "";
+  if (discussionHistory && discussionHistory.length > 0) {
+      discussionContextStr = discussionHistory
+        .filter(m => m.role === 'assistant') 
+        .map(m => `导师/审稿人意见: ${m.content}`)
+        .join("\n").slice(-2000); 
   }
 
-  onLog('TermChecker', `术语检查完毕，新增: ${newTerms.length} 个`);
-  
-  return {
-    rawOutput: rawText,
-    content: cleanContent,
-    newTerms,
-    newRefs
-  };
+  const systemPrompt = `
+    角色：专业的学术论文撰写 Agent。
+    任务：撰写章节具体的**正文内容**。
+    
+    【论文背景】
+    题目：${thesisTitle}
+    所属一级章节：${chapterLevel1.title}
+    
+    【核心探讨上下文】
+    ${discussionContextStr}
+
+    【撰写目标】
+    标题：${targetSection.title} (Level ${targetSection.level})
+    ${isLevel1 ? "注意：这是章首语，请概括本章主要内容。" : "注意：请专注于本小节的具体技术/理论细节。"}
+    
+    【用户指令】
+    ${userInstructions ? userInstructions : "无"}
+
+    【格式规范 (CRITICAL)】
+    1. **只输出正文**，不要输出章节标题。
+    2. **特殊对象占位符** (解析器将自动将其转换为复杂的Word格式):
+       - 插入图片：[[FIG:图片描述]]  (例如: [[FIG:U-Net网络结构图]])
+       - 插入表格：[[TBL:表格描述]]
+       - 插入引用：[[REF:引用ID]] (例如: [[REF:1]])
+       - 不要使用Markdown图片或表格语法。
+    3. **段落**：普通文本段落之间用换行符分隔即可。不要使用 XML/HTML 标签。
+    4. **字数**：300-800 字。
+
+    请开始撰写：
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: settings.modelName,
+      contents: systemPrompt,
+    });
+
+    let rawText = response.text || "";
+    rawText = cleanMarkdownArtifacts(rawText);
+    return rawText;
+  } catch (e) {
+    console.error(e);
+    throw new Error(`撰写失败: ${e instanceof Error ? e.message : '未知错误'}`);
+  }
+};
+
+// --- Post-Processing Agents (Chapter Completion) ---
+
+export const runPostProcessingAgents = async (
+  fullChapterText: string,
+  settings: ApiSettings
+): Promise<{
+    polishedText: string;
+    newReferences: Reference[];
+    newTerms: TechnicalTerm[];
+}> => {
+   const ai = getClient(settings);
+   
+   const prompt = `
+     You are a Quality Assurance Agent Cluster.
+     Input Text (Raw Content):
+     ${fullChapterText.slice(0, 15000)}
+
+     Tasks:
+     1. **Syntax Check**: Ensure specific placeholders are correctly formatted: [[FIG:Desc]], [[TBL:Desc]], [[REF:ID]]. 
+     2. **Term Check**: Extract technical terms.
+     3. **Reference Check**: Extract [[REF:ID]] usage and generate a reference list.
+     
+     Return JSON:
+     {
+       "polishedText": "Corrected text...",
+       "references": [
+          { "id": 1, "description": "Author, Title, Year..." }
+       ],
+       "terms": [
+          { "term": "GAN", "fullName": "Generative Adversarial Network", "acronym": "GAN" }
+       ]
+     }
+   `;
+
+   try {
+     const response = await ai.models.generateContent({
+        model: settings.modelName,
+        contents: prompt,
+        config: { responseMimeType: "application/json" }
+     });
+     
+     const result = JSON.parse(response.text || "{}");
+     return {
+        polishedText: result.polishedText || fullChapterText,
+        newReferences: result.references || [],
+        newTerms: result.terms || []
+     };
+
+   } catch (e) {
+      console.error("Post processing failed", e);
+      return { polishedText: fullChapterText, newReferences: [], newTerms: [] };
+   }
 };
 
 export const repairChapterFormatting = async (
   rawContent: string, 
-  formatRules: FormatRules
+  formatRules: FormatRules,
+  settings: ApiSettings
 ) => {
-  const { styleMap } = formatRules;
-  
-  const systemPrompt = `
-    角色：XML 格式修复专家 (Format Fixer)
-    任务：修复用户提供的文本内容，使其符合严格的 XML 标签规范。
-    
-    【问题描述】
-    之前的 AI 输出虽然包含文字内容，但可能遗漏了 XML 标签，导致前端解析器无法显示。
-    
-    【修复规则】
-    1. **保留所有文字**：绝对不要删除或修改原始文本的内容。
-    2. **补充标签**：确保每一段文字都被正确的 <p style="...">...</p> 包裹。
-    3. **标签映射表**:
-       - 章节标题 (Heading 1/2/3): <p style="${styleMap.heading1}">...</p> (自行根据上下文判断层级)
-       - 普通正文: <p style="${styleMap.normal}">...</p>
-       - 图表占位符: <figure_placeholder ... /> (保持原样)
-       - 题注: <p style="${styleMap.captionFigure}">...</p>
-    
-    【输入内容】
-    ${rawContent}
-    
-    【输出要求】
-    只输出修复后的带有完整 XML 标签的字符串。
-  `;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview', 
-    contents: systemPrompt,
-  });
-
-  let fixedText = response.text || "";
-  fixedText = cleanMarkdownArtifacts(fixedText); 
-  fixedText = fixedText.replace(/<metadata>[\s\S]*?<\/metadata>/, '').trim();
-  return fixedText;
+   // Deprecated in favor of strict placeholder syntax
+   return rawContent;
 };

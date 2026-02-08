@@ -1,18 +1,23 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { ThesisStructure, Chapter, ChatMessage } from '../types';
+import { ThesisStructure, Chapter, ChatMessage, ApiSettings, FormatRules } from '../types';
 import { chatWithSupervisor } from '../services/geminiService';
+import StructureVisualizer from './StructureVisualizer';
 
 interface StructurePlannerProps {
   thesis: ThesisStructure;
-  onConfirm: () => void;
+  onStructureConfirmed: (newThesis: ThesisStructure) => Promise<void>;
   setThesis: React.Dispatch<React.SetStateAction<ThesisStructure>>;
+  apiSettings: ApiSettings;
+  formatRules?: FormatRules | null;
 }
 
-const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onConfirm, setThesis }) => {
+const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onStructureConfirmed, setThesis, apiSettings, formatRules }) => {
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [isGeneratingXML, setIsGeneratingXML] = useState(false);
+  const [viewMode, setViewMode] = useState<'outline' | 'visual'>('outline');
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Initial Greeting
@@ -36,6 +41,11 @@ const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onConfirm, 
   const handleSendMessage = async () => {
     if (!inputMessage.trim()) return;
 
+    if (!apiSettings.apiKey) {
+        alert("请先在设置中配置 API Key");
+        return;
+    }
+
     const userMsg: ChatMessage = {
       role: 'user',
       content: inputMessage,
@@ -46,8 +56,13 @@ const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onConfirm, 
     setInputMessage("");
     setIsTyping(true);
 
-    // Call Supervisor Agent
-    const result = await chatWithSupervisor([...chatHistory, userMsg], thesis.title, { chapters: thesis.chapters });
+    // Call Supervisor Agent with Settings
+    const result = await chatWithSupervisor(
+        [...chatHistory, userMsg], 
+        thesis.title, 
+        { chapters: thesis.chapters },
+        apiSettings
+    );
     
     setIsTyping(false);
     
@@ -58,24 +73,19 @@ const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onConfirm, 
     };
     setChatHistory(prev => [...prev, aiMsg]);
 
-    // Update structure recursively if agent returned a modification
     if (result.updatedStructure && result.updatedStructure.chapters) {
-      
       const cleanTitle = (title: string) => {
-        // Regex to remove "1.1", "1. ", "第一章", "Chapter 1" etc.
-        // Matches start of string, optionally "第" + Chinese number + "章", OR digits + dots/spaces
-        return title.replace(/^((第[一二三四五六七八九十\d]+[章节])|([\d\.]+)|(Chapter\s*\d+))\s*/i, '').trim();
+        return title; 
       };
 
       const mapChaptersRecursive = (chapters: any[], parentId: string, levelOffset: number): Chapter[] => {
         return chapters.map((ch, idx) => {
           const currentId = `${parentId}-${idx + 1}`;
-          // Ensure level is correct (1, 2, 3)
           const currentLevel = ch.level || (levelOffset + 1);
           
           return {
             id: currentId,
-            title: cleanTitle(ch.title), // <--- CLEANING HAPPENS HERE
+            title: cleanTitle(ch.title),
             level: currentLevel,
             status: 'pending',
             designConfirmed: true,
@@ -94,11 +104,19 @@ const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onConfirm, 
     }
   };
 
-  // Recursive component for rendering the outline tree
+  const handleConfirm = async () => {
+      setIsGeneratingXML(true);
+      try {
+          await onStructureConfirmed(thesis);
+      } catch (e) {
+          alert("结构同步到模版失败: " + e);
+          setIsGeneratingXML(false);
+      }
+  };
+
   const ChapterNode = ({ chapter, indexPrefix }: { chapter: Chapter, indexPrefix: string }) => {
     return (
       <div className="mb-2">
-        {/* Chapter Title Row */}
         <div className={`
           flex items-center p-3 rounded-lg border 
           ${chapter.level === 1 ? 'bg-white border-slate-200 shadow-sm' : 
@@ -109,7 +127,8 @@ const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onConfirm, 
             font-mono text-slate-400 mr-3 shrink-0
             ${chapter.level === 1 ? 'font-bold text-slate-600' : 'text-xs'}
           `}>
-            {indexPrefix}
+            {/* If title already has "第X章", suppress indexPrefix for L1 */}
+            {chapter.level === 1 && chapter.title.startsWith("第") ? "" : indexPrefix}
           </span>
           <span className={`
             text-slate-800 
@@ -121,7 +140,6 @@ const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onConfirm, 
           </span>
         </div>
 
-        {/* Render Children Recursively */}
         {chapter.subsections && chapter.subsections.length > 0 && (
           <div className="mt-1">
             {chapter.subsections.map((sub, idx) => (
@@ -196,39 +214,66 @@ const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onConfirm, 
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
             大纲预览
-            <span className="text-xs font-normal text-slate-500 bg-slate-200 px-2 py-0.5 rounded-full">
-              包含 {thesis.chapters.reduce((acc, ch) => acc + 1 + (ch.subsections?.length||0), 0)} 个章节节点
-            </span>
           </h2>
-          {thesis.chapters.length > 0 && (
-            <button 
-              onClick={onConfirm}
-              className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg shadow-lg shadow-green-200 transition-all font-medium animate-pulse flex items-center gap-2"
-            >
-              <span>确认大纲</span>
-              <span className="text-xs opacity-80">进入细节确认与撰写 →</span>
-            </button>
-          )}
+          <div className="flex gap-2">
+             <div className="flex bg-slate-200 rounded-lg p-1 text-xs font-bold text-slate-600">
+                <button 
+                   onClick={() => setViewMode('outline')}
+                   className={`px-3 py-1 rounded ${viewMode === 'outline' ? 'bg-white shadow text-blue-600' : 'hover:bg-slate-300/50'}`}
+                >
+                   大纲树
+                </button>
+                <button 
+                   onClick={() => setViewMode('visual')}
+                   className={`px-3 py-1 rounded ${viewMode === 'visual' ? 'bg-white shadow text-blue-600' : 'hover:bg-slate-300/50'}`}
+                >
+                   模版解析
+                </button>
+             </div>
+
+             {thesis.chapters.length > 0 && (
+                <button 
+                onClick={handleConfirm}
+                disabled={isGeneratingXML}
+                className="bg-green-600 hover:bg-green-700 disabled:bg-slate-400 text-white px-4 py-1.5 rounded-lg shadow-lg shadow-green-200 transition-all font-medium flex items-center gap-2 text-xs"
+                >
+                {isGeneratingXML ? (
+                    <>
+                        <span className="animate-spin">🔄</span>
+                        生成并同步模版...
+                    </>
+                ) : (
+                    <>
+                         确认并下一步 →
+                    </>
+                )}
+                </button>
+             )}
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto pr-2">
-          {thesis.chapters.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-slate-400">
-              <span className="text-4xl mb-4">🌳</span>
-              <p>请在左侧描述你的研究思路</p>
-              <p className="text-sm mt-2">AI 导师将为您生成三级标题结构</p>
-            </div>
-          ) : (
-            <div>
-              {thesis.chapters.map((chapter, idx) => (
-                <ChapterNode 
-                  key={chapter.id} 
-                  chapter={chapter} 
-                  indexPrefix={`${idx + 1}`} 
-                />
-              ))}
-            </div>
-          )}
+           {viewMode === 'outline' ? (
+              thesis.chapters.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                  <span className="text-4xl mb-4">🌳</span>
+                  <p>请在左侧描述你的研究思路</p>
+                  <p className="text-sm mt-2">AI 导师将为您生成三级标题结构</p>
+                </div>
+              ) : (
+                <div>
+                  {thesis.chapters.map((chapter, idx) => (
+                    <ChapterNode 
+                      key={chapter.id} 
+                      chapter={chapter} 
+                      indexPrefix={`${idx + 1}`} 
+                    />
+                  ))}
+                </div>
+              )
+           ) : (
+              <StructureVisualizer formatRules={formatRules || null} thesis={thesis} />
+           )}
         </div>
       </div>
     </div>
