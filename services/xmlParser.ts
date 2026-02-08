@@ -20,8 +20,6 @@ const NS = {
   v: "urn:schemas-microsoft-com:vml"
 };
 
-const FIVE_SZ = "21"; // 10.5pt (五号字)
-
 // -------------------- Text Normalization --------------------
 const normalizeTitle = (s: string) =>
   (s || "")
@@ -108,139 +106,13 @@ const hasImageLike = (p: Element) =>
   p.getElementsByTagNameNS(NS.v, "shape").length > 0;
 
 const hasFieldSEQ = (p: Element) => getInstrTexts(p).some(t => /\bSEQ\b/.test(t));
-const hasFieldREF = (p: Element) => getInstrTexts(p).some(t => /\bREF\b/.test(t));
-
-// -------------------- Low-Level XML Construction --------------------
-
-// 1. Clone a paragraph but keep ONLY pPr (properties), remove all content
-const cloneParaSkeleton = (p: Element, doc: Document) => {
-  const clone = p.cloneNode(true) as Element;
-  const pPr = getChildByTagNameNS(clone, NS.w, "pPr");
-  while (clone.firstChild) clone.removeChild(clone.firstChild);
-  if (pPr) clone.appendChild(pPr);
-  return clone;
-};
-
-// 2. Ensure run has standard font size (Five / 10.5pt)
-const ensureRunFiveSize = (r: Element, doc: Document) => {
-  let rPr = getChildByTagNameNS(r, NS.w, "rPr");
-  if (!rPr) {
-    rPr = doc.createElementNS(NS.w, "w:rPr");
-    if (r.firstChild) r.insertBefore(rPr, r.firstChild);
-    else r.appendChild(rPr);
-  }
-  const ensure = (name: string) => {
-    let el = getChildByTagNameNS(rPr!, NS.w, name);
-    if (!el) {
-      el = doc.createElementNS(NS.w, `w:${name}`);
-      rPr!.appendChild(el);
-    }
-    el.setAttributeNS(NS.w, "w:val", FIVE_SZ);
-  };
-  ensure("sz");
-  ensure("szCs");
-};
-
-const findFirstTextRun = (p: Element): Element | null => {
-  const rs = p.getElementsByTagNameNS(NS.w, "r");
-  for (let i = 0; i < rs.length; i++) {
-    if (rs[i].getElementsByTagNameNS(NS.w, "t").length > 0) return rs[i];
-  }
-  return rs.length > 0 ? rs[0] : null;
-};
-
-// 3. Create a Run with Text
-const makeRunTextLike = (sampleRun: Element | null, text: string, doc: Document) => {
-  const r = sampleRun ? (sampleRun.cloneNode(true) as Element) : doc.createElementNS(NS.w, "w:r");
-  // Clean content except rPr
-  const rPr = getChildByTagNameNS(r, NS.w, "rPr");
-  while (r.lastChild) {
-    if (r.lastChild === rPr) break;
-    r.removeChild(r.lastChild);
-  }
-  const t = doc.createElementNS(NS.w, "w:t");
-  t.setAttribute("xml:space", "preserve");
-  t.textContent = text;
-  r.appendChild(t);
-  ensureRunFiveSize(r, doc);
-  return r;
-};
-
-// 4. Create Field Char (begin/separate/end)
-const makeRunFldCharLike = (sampleRun: Element | null, fldCharType: string, doc: Document) => {
-  const r = sampleRun ? (sampleRun.cloneNode(true) as Element) : doc.createElementNS(NS.w, "w:r");
-  const rPr = getChildByTagNameNS(r, NS.w, "rPr");
-  while (r.lastChild) {
-    if (r.lastChild === rPr) break;
-    r.removeChild(r.lastChild);
-  }
-  const fc = doc.createElementNS(NS.w, "w:fldChar");
-  fc.setAttributeNS(NS.w, "w:fldCharType", fldCharType);
-  r.appendChild(fc);
-  ensureRunFiveSize(r, doc);
-  return r;
-};
-
-// 5. Create Instruction Text (e.g. "SEQ Figure")
-const makeRunInstrLike = (sampleRun: Element | null, instr: string, doc: Document) => {
-  const r = sampleRun ? (sampleRun.cloneNode(true) as Element) : doc.createElementNS(NS.w, "w:r");
-  const rPr = getChildByTagNameNS(r, NS.w, "rPr");
-  while (r.lastChild) {
-    if (r.lastChild === rPr) break;
-    r.removeChild(r.lastChild);
-  }
-  const it = doc.createElementNS(NS.w, "w:instrText");
-  it.setAttribute("xml:space", "preserve");
-  it.textContent = instr;
-  r.appendChild(it);
-  ensureRunFiveSize(r, doc);
-  return r;
-};
-
-// 6. Create Full Field Sequence (Begin -> Instr -> Separate -> Placeholder -> End)
-const createFieldRuns = (doc: Document, sampleRun: Element | null, instr: string, placeholder: string) => {
-  return [
-    makeRunFldCharLike(sampleRun, "begin", doc),
-    makeRunInstrLike(sampleRun, instr, doc),
-    makeRunFldCharLike(sampleRun, "separate", doc),
-    makeRunTextLike(sampleRun, placeholder, doc),
-    makeRunFldCharLike(sampleRun, "end", doc)
-  ];
-};
-
-const createBookmark = (doc: Document, name: string, id: number, type: "start" | "end") => {
-  if (type === "start") {
-    const bm = doc.createElementNS(NS.w, "w:bookmarkStart");
-    bm.setAttributeNS(NS.w, "w:id", id.toString());
-    bm.setAttributeNS(NS.w, "w:name", name);
-    return bm;
-  }
-  const bm = doc.createElementNS(NS.w, "w:bookmarkEnd");
-  bm.setAttributeNS(NS.w, "w:id", id.toString());
-  return bm;
-};
-
-const setParaCenter = (p: Element, doc: Document) => {
-  let pPr = getChildByTagNameNS(p, NS.w, "pPr");
-  if (!pPr) {
-    pPr = doc.createElementNS(NS.w, "w:pPr");
-    if (p.firstChild) p.insertBefore(pPr, p.firstChild);
-    else p.appendChild(pPr);
-  }
-  let jc = getChildByTagNameNS(pPr, NS.w, "jc");
-  if (!jc) {
-    jc = doc.createElementNS(NS.w, "w:jc");
-    pPr.appendChild(jc);
-  }
-  jc.setAttributeNS(NS.w, "w:val", "center");
-};
 
 // -------------------- Parsing Constants & Strategies --------------------
 
 const FRONT_KEYS = new Set(["摘要", "摘 要", "ABSTRACT", "目录", "目 录"]);
 const LOT_KEY = "表格目录";
 const LOF_KEY = "插图目录";
-// Use regex for Back matter to catch "Publication" etc.
+
 const isBackMatterTitle = (txtRaw: string) => {
   const t = normalizeForMatch(txtRaw);
   return t === "致谢" || t === "参考文献" || t === "作者简介" || t === "附录" || /^攻读.*期间.*发表/.test(t);
@@ -280,7 +152,6 @@ const detectTocFieldOp = (p: Element) => {
   const tocInstr = instrHits.find(x => /^TOC\b/.test(x));
   let pushed: TocFieldType | null = null;
   if (tocInstr) {
-    // Check switches to distinguish TOC from LOT/LOF
     if (/\bc\s*"table"/i.test(tocInstr) || /\\c\s*"table"/i.test(tocInstr)) pushed = "lot";
     else if (/\bc\s*"figure"/i.test(tocInstr) || /\\c\s*"figure"/i.test(tocInstr)) pushed = "lof";
     else pushed = "toc";
@@ -350,15 +221,9 @@ const extractMapping = (
 
   const root = makeSection("root", "ROOT", 0, undefined, 1);
   let currentSection = root;
-
-  // Track hierarchy for ownership assignment
   const headingStack: { level: 1 | 2 | 3; title: string }[] = [];
-  
-  // Track TOC Fields
   const tocStack: TocField[] = [];
   let tocDepthId = 0;
-  
-  // High-level mode state
   let mode: "front" | "body" | "back" = "front";
 
   const enterSection = (kind: MappingSectionKind, title: string, level: 0 | 1 | 2 | 3, order: number) => {
@@ -367,8 +232,7 @@ const extractMapping = (
 
   const currentTocKind = (): MappingSectionKind | null => {
     if (tocStack.length === 0) return null;
-    const top = tocStack[tocStack.length - 1].type;
-    return top; // 'toc' | 'lot' | 'lof'
+    return tocStack[tocStack.length - 1].type;
   };
 
   const getOwner = () => ({
@@ -400,9 +264,8 @@ const extractMapping = (
       const sid = extractStyleId(node) || undefined;
       const headingLevel = sid ? styleLevelMap[sid] : undefined;
       const bookmarks = getBookmarkNames(node);
-
-      // 1. TOC Field Tracking
       const tocOp = detectTocFieldOp(node);
+      
       if (tocOp.pushed) {
         tocDepthId += 1;
         tocStack.push({ type: tocOp.pushed, depthId: tocDepthId });
@@ -411,11 +274,10 @@ const extractMapping = (
         if (tocStack.length > 0) tocStack.pop();
       }
 
-      // 2. Back Matter Detection (Highest Priority, strict text match)
       if (isBackMatterTitle(txtRaw)) {
         mode = "back";
         headingStack.length = 0;
-        tocStack.length = 0; // Force exit TOC if malformed
+        tocStack.length = 0;
         enterSection("back", txtNorm, 1, order);
         pushBlock({
           order, nodeType: "p", kind: "back_title", level: 1, styleId: sid, text: txtRaw,
@@ -424,10 +286,8 @@ const extractMapping = (
         continue;
       }
 
-      // 3. Inside TOC/LOT/LOF
       const tocKind = currentTocKind();
       if (tocKind) {
-        // Even inside TOC, if we see an explicit title for LOT/LOF, switch section
         if (isListOfTablesTitle(txtRaw)) {
              enterSection("lot", LOT_KEY, 1, order);
              pushBlock({
@@ -444,8 +304,6 @@ const extractMapping = (
              });
              continue;
         }
-
-        // Standard TOC Item
         pushBlock({
           order, nodeType: "p", kind: "toc_item", level: 0, styleId: sid, text: txtRaw,
           owner: { sectionId: currentSection.id }, fields: tocOp.instrHits, bookmarks
@@ -453,7 +311,6 @@ const extractMapping = (
         continue;
       }
 
-      // 4. Front Matter Titles
       if (isFrontMatterTitle(txtRaw)) {
         mode = "front";
         headingStack.length = 0;
@@ -466,24 +323,19 @@ const extractMapping = (
         continue;
       }
 
-      // 5. Body Start Detection
       if (mode !== "body" && headingLevel === 1) {
         mode = "body";
         headingStack.length = 0;
       }
 
-      // 6. Body Headings (Level 1, 2, 3)
       if (mode === "body" && headingLevel) {
-         // Update Stack
          while(headingStack.length > 0 && headingStack[headingStack.length - 1].level >= headingLevel) {
              headingStack.pop();
          }
          headingStack.push({ level: headingLevel, title: txtNorm });
-
          if (headingLevel === 1) {
              enterSection("body", txtNorm, 1, order);
          }
-         
          pushBlock({
             order, nodeType: "p", kind: "heading", level: headingLevel, styleId: sid, text: txtRaw,
             owner: getOwner(), fields: tocOp.instrHits, bookmarks
@@ -491,7 +343,6 @@ const extractMapping = (
          continue;
       }
 
-      // 7. Regular Content (Body, Front, Back)
       let kind: BlockKind = "paragraph";
       if (hasOMML(node)) kind = "equation";
       else if (hasImageLike(node)) kind = "image_para";
@@ -531,7 +382,6 @@ const extractMapping = (
   };
 };
 
-// -------------------- Public Parser Function --------------------
 export const parseWordXML = (xmlString: string): FormatRules => {
   const parser = new DOMParser();
   const doc = parser.parseFromString(xmlString, "text/xml");
@@ -583,353 +433,504 @@ export const parseWordXML = (xmlString: string): FormatRules => {
   };
 };
 
-// -------------------- Generation Logic --------------------
-let globalId = 60000;
+// =========================================================================================
+// ==========================  GENERATION LOGIC REWRITE  ===================================
+// =========================================================================================
 
-// === ADDED: New Helper to find Table Prototypes ===
-const createTableNodeTS = (doc: Document, proto: Element | null): Element => {
-  const tbl = doc.createElementNS(NS.w, "w:tbl");
-  const tblPr = doc.createElementNS(NS.w, "w:tblPr");
-  const tblW = doc.createElementNS(NS.w, "w:tblW");
-  tblW.setAttributeNS(NS.w, "w:type", "dxa");
-  tblW.setAttributeNS(NS.w, "w:w", "9000"); // Approx page width
-  tblPr.appendChild(tblW);
-  
-  // Center table
-  const tblJc = doc.createElementNS(NS.w, "w:tblJc");
-  tblJc.setAttributeNS(NS.w, "w:val", "center");
-  tblPr.appendChild(tblJc);
-  
-  // Borders
-  const tblBorders = doc.createElementNS(NS.w, "w:tblBorders");
-  ['top', 'bottom', 'left', 'right', 'insideH', 'insideV'].forEach(border => {
-      const b = doc.createElementNS(NS.w, `w:${border}`);
-      b.setAttributeNS(NS.w, "w:val", "single");
-      b.setAttributeNS(NS.w, "w:sz", "4");
-      tblBorders.appendChild(b);
-  });
-  tblPr.appendChild(tblBorders);
-  tbl.appendChild(tblPr);
+let globalId = 80000; // Bookmarks and Reference IDs
 
-  // Use prototype if provided to clone style
-  if (proto) {
-      // Logic to copy table properties if needed
-  }
+/**
+ * 核心思想：原型克隆 (Prototype Cloning)
+ * 不手动创建 <w:p>，而是找到模版中已有的“一级标题”、“正文”、“参考文献条目”等段落，
+ * 复制它 (cloneNode)，保留 w:pPr 和 w:rPr，然后把内容替换掉。
+ */
 
-  // Create a 2x2 grid
-  for(let i=0; i<2; i++) {
-      const tr = doc.createElementNS(NS.w, "w:tr");
-      for(let j=0; j<2; j++) {
-          const tc = doc.createElementNS(NS.w, "w:tc");
-          const tcPr = doc.createElementNS(NS.w, "w:tcPr");
-          const tcW = doc.createElementNS(NS.w, "w:tcW");
-          tcW.setAttributeNS(NS.w, "w:type", "dxa");
-          tcW.setAttributeNS(NS.w, "w:w", "4500");
-          tcPr.appendChild(tcW);
-          tc.appendChild(tcPr);
-          
-          const p = doc.createElementNS(NS.w, "w:p");
-          setParaCenter(p, doc);
-          p.appendChild(makeRunTextLike(null, i===0 ? "Header" : "Data", doc));
-          tc.appendChild(p);
-          tr.appendChild(tc);
-      }
-      tbl.appendChild(tr);
-  }
-  return tbl;
+interface Prototypes {
+    h1: Element | null;
+    h2: Element | null;
+    h3: Element | null;
+    normal: Element | null;   // 真正的正文
+    caption: Element | null;
+    refEntry: Element | null;
+    table: Element | null;
+}
+
+// Helper: 扫描 Body 提取原型
+const findPrototypes = (body: Element, headingStyles: Record<number, string>): Prototypes => {
+    const protos: Prototypes = { h1: null, h2: null, h3: null, normal: null, caption: null, refEntry: null, table: null };
+    const children = Array.from(body.children);
+    let seenRefTitle = false;
+
+    for (const node of children) {
+        if (node.localName === 'tbl') {
+            if (!protos.table) protos.table = node;
+            continue;
+        }
+        if (node.localName !== 'p') continue;
+
+        const styleId = extractStyleId(node);
+        const text = getParaTextRaw(node);
+        const normalizedText = normalizeForMatch(text);
+
+        // 识别标题原型
+        if (styleId === headingStyles[1] && !protos.h1) {
+            // 排除前置标题（摘要目录）
+            if (!isFrontMatterTitle(text) && !isBackMatterTitle(text)) protos.h1 = node;
+        }
+        else if (styleId === headingStyles[2] && !protos.h2) protos.h2 = node;
+        else if (styleId === headingStyles[3] && !protos.h3) protos.h3 = node;
+
+        // 识别参考文献条目（在“参考文献”标题后的第一个非空段落）
+        if (isBackMatterTitle(text) && normalizedText.includes("参考文献")) {
+            seenRefTitle = true;
+        } else if (seenRefTitle && !protos.refEntry && text.trim()) {
+            protos.refEntry = node;
+        }
+
+        // 识别正文原型 (KEY FIX: 确保不是标题，且有一定长度，防止误判空行)
+        if (!protos.normal && 
+            styleId !== headingStyles[1] && 
+            styleId !== headingStyles[2] && 
+            styleId !== headingStyles[3] &&
+            !hasFieldSEQ(node) &&
+            !isFrontMatterTitle(text) &&
+            !isBackMatterTitle(text) &&
+            text.trim().length > 5
+        ) {
+            protos.normal = node;
+        }
+        
+        // 识别图表标题 (SEQ)
+        if (hasFieldSEQ(node) && !protos.caption) protos.caption = node;
+    }
+
+    // Fallback: 如果实在没找到 Normal，随便找个没样式的 P
+    if (!protos.normal) {
+        protos.normal = children.find(c => c.localName === 'p' && !extractStyleId(c)) || children.find(c => c.localName === 'p') || null;
+    }
+    
+    return protos;
 };
 
-// === ADDED: New Finders ===
-const findEquationPrototype = (body: Element): Element | null => {
-  const ps = body.getElementsByTagNameNS(NS.w, "p");
-  for (let i = 0; i < ps.length; i++) {
-      if (hasOMML(ps[i])) return ps[i];
-  }
-  return null;
+// Helper: 克隆并替换文本 (保留样式的核心)
+const cloneWithText = (doc: Document, proto: Element, newText: string) => {
+    const clone = proto.cloneNode(true) as Element;
+    
+    // 1. 保留 w:pPr (段落属性: 间距, 对齐, 大纲级别)
+    // 2. 找到第一个 w:r (Run) 作为样式样本 (保留 w:rPr: 字体, 字号)
+    let sampleRun = getChildByTagNameNS(clone, NS.w, "r");
+    if (!sampleRun) {
+        // 如果原型是空段落，可能没有 run，创建一个标准的
+        sampleRun = doc.createElementNS(NS.w, "w:r");
+        const rPr = doc.createElementNS(NS.w, "w:rPr");
+        // 默认五号字 (防止太小)
+        const sz = doc.createElementNS(NS.w, "w:sz"); sz.setAttributeNS(NS.w, "w:val", "21");
+        rPr.appendChild(sz);
+        sampleRun.appendChild(rPr);
+    }
+
+    // 3. 清空 clone 的所有子节点 (除了 pPr)
+    const pPr = getChildByTagNameNS(clone, NS.w, "pPr");
+    while (clone.firstChild) {
+        if (clone.firstChild === pPr) {
+            // pPr 移到最前面，防止被删后还在后面
+            clone.removeChild(clone.firstChild);
+        } else {
+            clone.removeChild(clone.firstChild);
+        }
+    }
+    if (pPr) clone.appendChild(pPr); // 放回 pPr
+
+    // 4. 创建新 Run 并插入文本
+    const newRun = sampleRun.cloneNode(true) as Element;
+    // 清空 Run 的内容 (保留 rPr)
+    const rPr = getChildByTagNameNS(newRun, NS.w, "rPr");
+    while (newRun.firstChild) newRun.removeChild(newRun.firstChild);
+    if (rPr) newRun.appendChild(rPr);
+
+    const t = doc.createElementNS(NS.w, "w:t");
+    t.setAttribute("xml:space", "preserve");
+    t.textContent = newText;
+    newRun.appendChild(t);
+    
+    clone.appendChild(newRun);
+    return clone;
 };
 
-const findCaptionPrototype = (body: Element): Element | null => {
-  const ps = body.getElementsByTagNameNS(NS.w, "p");
-  for (let i = 0; i < ps.length; i++) {
-      if (hasFieldSEQ(ps[i])) return ps[i];
-  }
-  return null;
+// Helper: 创建域代码 Run (Begin, Instr, Sep, Result, End)
+const createFieldRuns = (doc: Document, sampleRun: Element, instr: string, display: string) => {
+    const makeRun = (type: 'begin' | 'end' | 'separate' | 'instr' | 'text', val?: string) => {
+        const r = sampleRun.cloneNode(true) as Element;
+        // 清理内容
+        const rPr = getChildByTagNameNS(r, NS.w, "rPr");
+        while (r.firstChild) r.removeChild(r.firstChild);
+        if (rPr) r.appendChild(rPr);
+
+        if (type === 'text') {
+            const t = doc.createElementNS(NS.w, "w:t");
+            t.setAttribute("xml:space", "preserve");
+            t.textContent = val || "";
+            r.appendChild(t);
+        } else if (type === 'instr') {
+            const it = doc.createElementNS(NS.w, "w:instrText");
+            it.setAttribute("xml:space", "preserve");
+            it.textContent = val || "";
+            r.appendChild(it);
+        } else {
+            const f = doc.createElementNS(NS.w, "w:fldChar");
+            f.setAttributeNS(NS.w, "w:fldCharType", type);
+            r.appendChild(f);
+        }
+        return r;
+    };
+
+    return [
+        makeRun('begin'),
+        makeRun('instr', instr),
+        makeRun('separate'),
+        makeRun('text', display),
+        makeRun('end')
+    ];
 };
 
-const findTablePrototype = (body: Element): Element | null => {
-    const tbls = body.getElementsByTagNameNS(NS.w, "tbl");
-    return tbls.length > 0 ? tbls[0] : null;
+const createBookmark = (doc: Document, name: string, id: string, type: "start" | "end") => {
+    const tagName = type === "start" ? "w:bookmarkStart" : "w:bookmarkEnd";
+    const el = doc.createElementNS(NS.w, tagName);
+    el.setAttributeNS(NS.w, "w:id", id);
+    if (type === "start") el.setAttributeNS(NS.w, "w:name", name);
+    return el;
 };
 
-// === UPDATED: Use Prototypes in CreateContentNodes ===
+// 生成正文内容节点 (处理图表占位符)
 const createContentNodes = (
     contentRaw: string, 
     doc: Document, 
-    protos: { normal: Element, caption: Element | null, equation: Element | null, table: Element | null }
+    protos: Prototypes
 ): Element[] => {
     const nodes: Element[] = [];
     if (!contentRaw) return nodes;
 
-    const sample = findFirstTextRun(protos.normal);
     const parts = contentRaw.split(/(\[\[.*?\]\])/g);
+    // 必须有正文原型，否则无法生成
+    const baseProto = protos.normal || protos.h1; // Fallback to H1 is dangerous but better than crash
+    if (!baseProto) return nodes;
+
+    // 提取正文原型的样式 Run
+    let sampleRun = getChildByTagNameNS(baseProto, NS.w, "r");
 
     parts.forEach(part => {
         if (!part.trim()) return;
 
         if (part.startsWith("[[FIG:")) {
-            const desc = part.replace(/^\[\[FIG:/, "").replace(/\]\]$/, "");
-            const bm = `_Fig_${globalId}`;
-            
-            // Image Placeholder
-            const pImg = cloneParaSkeleton(protos.normal, doc);
-            setParaCenter(pImg, doc);
-            pImg.appendChild(makeRunTextLike(sample, "[图片占位]", doc));
-            nodes.push(pImg);
+             const desc = part.replace(/^\[\[FIG:/, "").replace(/\]\]$/, "");
+             const bmId = (globalId++).toString();
+             const bmName = `_Fig_${bmId}`;
+             
+             // 1. 图片占位 (居中正文)
+             const pImg = cloneWithText(doc, baseProto, "（在此处插入图片）");
+             // 强制居中
+             let pPr = getChildByTagNameNS(pImg, NS.w, "pPr");
+             if(!pPr) { pPr = doc.createElementNS(NS.w, "w:pPr"); pImg.appendChild(pPr); }
+             let jc = getChildByTagNameNS(pPr, NS.w, "jc");
+             if(!jc) { jc = doc.createElementNS(NS.w, "w:jc"); pPr.appendChild(jc); }
+             jc.setAttributeNS(NS.w, "w:val", "center");
+             nodes.push(pImg);
 
-            // Caption
-            const pFig = cloneParaSkeleton(protos.caption || protos.normal, doc);
-            setParaCenter(pFig, doc);
-            pFig.appendChild(createBookmark(doc, bm, globalId, "start"));
-            pFig.appendChild(makeRunTextLike(sample, "图 ", doc));
-            createFieldRuns(doc, sample, "STYLEREF 1 \\s", "X").forEach(r => pFig.appendChild(r));
-            pFig.appendChild(makeRunTextLike(sample, "-", doc));
-            createFieldRuns(doc, sample, "SEQ Figure \\* ARABIC \\s 1", "1").forEach(r => pFig.appendChild(r));
-            pFig.appendChild(createBookmark(doc, bm, globalId, "end"));
-            pFig.appendChild(makeRunTextLike(sample, "  " + desc, doc));
-            nodes.push(pFig);
-            globalId++;
+             // 2. 图注 (如果有 caption 原型用原型，没有用正文改居中)
+             let pCap = protos.caption ? protos.caption.cloneNode(true) as Element : baseProto.cloneNode(true) as Element;
+             // 清理内容
+             const capPr = getChildByTagNameNS(pCap, NS.w, "pPr");
+             while (pCap.firstChild) if(pCap.firstChild !== capPr) pCap.removeChild(pCap.firstChild); else pCap.removeChild(pCap.firstChild); // remove pPr too to re-append later
+             if(capPr) pCap.appendChild(capPr);
+             
+             // 强制居中
+             if(!capPr) { const newPr = doc.createElementNS(NS.w, "w:pPr"); pCap.appendChild(newPr); }
+             const finalPr = getChildByTagNameNS(pCap, NS.w, "pPr")!;
+             let capJc = getChildByTagNameNS(finalPr, NS.w, "jc");
+             if(!capJc) { capJc = doc.createElementNS(NS.w, "w:jc"); finalPr.appendChild(capJc); }
+             capJc.setAttributeNS(NS.w, "w:val", "center");
 
-        } else if (part.startsWith("[[TBL:")) {
-            const desc = part.replace(/^\[\[TBL:/, "").replace(/\]\]$/, "");
-            const bm = `_Tbl_${globalId}`;
+             // 构造内容: BM_Start -> 图 -> STYLEREF -> - -> SEQ -> BM_End -> Text
+             // 需要 Sample Run
+             let capSample = sampleRun;
+             if (protos.caption) {
+                 const r = getChildByTagNameNS(protos.caption, NS.w, "r");
+                 if (r) capSample = r;
+             }
+             if (!capSample) capSample = doc.createElementNS(NS.w, "w:r"); // Fallback
 
-            // Caption (usually above table)
-            const pTbl = cloneParaSkeleton(protos.caption || protos.normal, doc);
-            setParaCenter(pTbl, doc);
-            pTbl.appendChild(createBookmark(doc, bm, globalId, "start"));
-            pTbl.appendChild(makeRunTextLike(sample, "表 ", doc));
-            createFieldRuns(doc, sample, "STYLEREF 1 \\s", "X").forEach(r => pTbl.appendChild(r));
-            pTbl.appendChild(makeRunTextLike(sample, "-", doc));
-            createFieldRuns(doc, sample, "SEQ Table \\* ARABIC \\s 1", "1").forEach(r => pTbl.appendChild(r));
-            pTbl.appendChild(createBookmark(doc, bm, globalId, "end"));
-            pTbl.appendChild(makeRunTextLike(sample, "  " + desc, doc));
-            nodes.push(pTbl);
+             const appendText = (t: string) => {
+                 const r = capSample!.cloneNode(true) as Element;
+                 // clear r children except rPr
+                 const rPr = getChildByTagNameNS(r, NS.w, "rPr");
+                 while (r.firstChild) r.removeChild(r.firstChild);
+                 if(rPr) r.appendChild(rPr);
+                 const wt = doc.createElementNS(NS.w, "w:t");
+                 wt.setAttribute("xml:space", "preserve");
+                 wt.textContent = t;
+                 r.appendChild(wt);
+                 pCap.appendChild(r);
+             };
 
-            // Table
-            nodes.push(createTableNodeTS(doc, protos.table));
-            globalId++;
+             pCap.appendChild(createBookmark(doc, bmName, bmId, "start"));
+             appendText("图 ");
+             createFieldRuns(doc, capSample, "STYLEREF 1 \\s", "X").forEach(n => pCap.appendChild(n));
+             appendText("-");
+             createFieldRuns(doc, capSample, "SEQ Figure \\* ARABIC \\s 1", "1").forEach(n => pCap.appendChild(n));
+             pCap.appendChild(createBookmark(doc, bmName, bmId, "end"));
+             appendText("  " + desc);
+             
+             nodes.push(pCap);
+        }
+        else if (part.startsWith("[[TBL:")) {
+             const desc = part.replace(/^\[\[TBL:/, "").replace(/\]\]$/, "");
+             // Table logic similar to Fig but caption usually above
+             const pCap = cloneWithText(doc, baseProto, `表 [编号] ${desc} (请更新域代码)`);
+             // Force center
+             const pPr = getChildByTagNameNS(pCap, NS.w, "pPr");
+             if (pPr) {
+                let jc = getChildByTagNameNS(pPr, NS.w, "jc");
+                if (!jc) { jc = doc.createElementNS(NS.w, "w:jc"); pPr.appendChild(jc); }
+                jc.setAttributeNS(NS.w, "w:val", "center");
+             }
+             nodes.push(pCap);
 
-        } else if (part.startsWith("[[EQ:")) {
-            const content = part.replace(/^\[\[EQ:/, "").replace(/\]\]$/, "");
-            const bm = `_Eq_${globalId}`;
-            
-            // Equation Paragraph
-            // If we have an equation prototype, try to clone it, otherwise use normal
-            const pEq = protos.equation ? (protos.equation.cloneNode(true) as Element) : cloneParaSkeleton(protos.normal, doc);
-            // Simple approach: append text if we can't fully parse OMML
-            setParaCenter(pEq, doc);
-            
-            // Clean content if cloned
-            if (protos.equation) {
-                // Clear existing runs but keep OMML if possible? No, difficult.
-                // Fallback to text representation for now
-                while(pEq.firstChild) pEq.removeChild(pEq.firstChild);
-                // Re-add pPr
-                const pPr = getChildByTagNameNS(protos.equation, NS.w, "pPr");
-                if (pPr) pEq.appendChild(pPr.cloneNode(true));
+             // Insert Table Proto
+             if (protos.table) {
+                 nodes.push(protos.table.cloneNode(true) as Element);
+             } else {
+                 // Fallback Text Table
+                 nodes.push(cloneWithText(doc, baseProto, "[此处插入表格]"));
+             }
+        }
+        else if (part.startsWith("[[REF:")) {
+            // Inline reference logic [[REF:1]] -> [1] (Hyperlink)
+            // Implementation requires splitting the paragraph. 
+            // For simplicity in this fix, we output strict text.
+            const id = part.match(/\d+/)?.[0] || "?";
+            const p = cloneWithText(doc, baseProto, `[${id}]`);
+            // To do it right inline is complex without splitting runs. 
+            // We treat the whole block as normal text for now if mixed.
+            // Better strategy: The parser usually returns [[REF:1]] inside text.
+            // We handled that below.
+        }
+        else {
+            // Normal Text
+            // Handle Inline Refs inside this text block
+            // e.g. "According to [[REF:1]], we know..."
+            const subParts = part.split(/(\[\[REF:\d+\]\])/g);
+            if (subParts.length === 1) {
+                nodes.push(cloneWithText(doc, baseProto, part));
+            } else {
+                // Complex paragraph construction
+                const p = baseProto.cloneNode(true) as Element;
+                // Clear kids except pPr
+                const pPr = getChildByTagNameNS(p, NS.w, "pPr");
+                while (p.firstChild) p.removeChild(p.firstChild);
+                if (pPr) p.appendChild(pPr);
+
+                subParts.forEach(sp => {
+                    if (sp.match(/^\[\[REF:\d+\]\]$/)) {
+                        const id = sp.match(/\d+/)?.[0];
+                        const bmName = `_Ref_${id}_target`;
+                        if (sampleRun) {
+                           const appendRun = (t: string) => {
+                               const r = sampleRun!.cloneNode(true) as Element;
+                               const rPr = getChildByTagNameNS(r, NS.w, "rPr");
+                               while(r.firstChild) r.removeChild(r.firstChild);
+                               if(rPr) r.appendChild(rPr);
+                               const wt = doc.createElementNS(NS.w, "w:t");
+                               wt.setAttribute("xml:space", "preserve");
+                               wt.textContent = t;
+                               r.appendChild(wt);
+                               p.appendChild(r);
+                           };
+                           appendRun("[");
+                           createFieldRuns(doc, sampleRun, `REF ${bmName} \\r \\h`, id || "0").forEach(n => p.appendChild(n));
+                           appendRun("]");
+                        }
+                    } else if (sp) {
+                        // Text run
+                         if (sampleRun) {
+                            const r = sampleRun.cloneNode(true) as Element;
+                            const rPr = getChildByTagNameNS(r, NS.w, "rPr");
+                            while(r.firstChild) r.removeChild(r.firstChild);
+                            if(rPr) r.appendChild(rPr);
+                            const wt = doc.createElementNS(NS.w, "w:t");
+                            wt.setAttribute("xml:space", "preserve");
+                            wt.textContent = sp;
+                            r.appendChild(wt);
+                            p.appendChild(r);
+                         }
+                    }
+                });
+                nodes.push(p);
             }
-
-            pEq.appendChild(makeRunTextLike(sample, content + "    ", doc));
-            pEq.appendChild(createBookmark(doc, bm, globalId, "start"));
-            pEq.appendChild(makeRunTextLike(sample, "(", doc));
-            createFieldRuns(doc, sample, "STYLEREF 1 \\s", "X").forEach(r => pEq.appendChild(r));
-            pEq.appendChild(makeRunTextLike(sample, ".", doc));
-            createFieldRuns(doc, sample, "SEQ equation \\* ARABIC \\s 1", "1").forEach(r => pEq.appendChild(r));
-            pEq.appendChild(makeRunTextLike(sample, ")", doc));
-            pEq.appendChild(createBookmark(doc, bm, globalId, "end"));
-            
-            nodes.push(pEq);
-            globalId++;
-            
-        } else {
-            const p = cloneParaSkeleton(protos.normal, doc);
-            const refParts = part.split(/(\[\[REF:\d+\]\])/);
-            refParts.forEach(rp => {
-                const m = rp.match(/\[\[REF:(\d+)\]\]/);
-                if (m) {
-                    const id = m[1];
-                    const bm = `_Ref_${id}`;
-                    p.appendChild(makeRunTextLike(sample, "[", doc));
-                    createFieldRuns(doc, sample, `REF ${bm} \\r \\h`, id).forEach(r => p.appendChild(r));
-                    p.appendChild(makeRunTextLike(sample, "]", doc));
-                } else {
-                    p.appendChild(makeRunTextLike(sample, rp, doc));
-                }
-            });
-            nodes.push(p);
         }
     });
+
     return nodes;
 };
 
-// Strips "第1章", "1.1", "1.1.1" etc. for insertion
-const stripHeadingNumbering = (title: string): string => {
-    return title.replace(/^(第[一二三四五六七八九十]+章\s*|\d+(\.\d+)*\s*)/, "").trim();
-};
-
+// Main Export Function
 export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, references: Reference[]): string => {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(rules.rawXML, "text/xml");
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(rules.rawXML, "text/xml");
+    
+    // 1. 获取 Body
+    const docPart = getPkgPart(doc, "/word/document.xml");
+    const docRoot = getPartXmlRoot(docPart!);
+    const body = getChildByTagNameNS(docRoot!, NS.w, "body");
+    if (!body) throw new Error("Format Error: No body found");
 
-  const docPart = getPkgPart(doc, "/word/document.xml");
-  const docRoot = getPartXmlRoot(docPart!);
-  const body = getChildByTagNameNS(docRoot!, NS.w, "body");
-  if (!body) throw new Error("Invalid Document Structure");
+    // 2. 准备样式表
+    const stylesPart = getPkgPart(doc, "/word/styles.xml");
+    const stylesRoot = stylesPart ? getPartXmlRoot(stylesPart) : null;
+    const headingStyles = stylesRoot ? buildHeadingStyles(stylesRoot) : {
+        1: rules.styleIds.heading1, 2: rules.styleIds.heading2, 3: rules.styleIds.heading3
+    };
 
-  // 1. Re-map live DOM to find deletion ranges
-  const stylesPart = getPkgPart(doc, "/word/styles.xml");
-  const stylesRoot = stylesPart ? getPartXmlRoot(stylesPart) : null;
-  const headingStyles = stylesRoot ? buildHeadingStyles(stylesRoot) : {
-    1: rules.styleIds.heading1, 2: rules.styleIds.heading2, 3: rules.styleIds.heading3
-  };
+    // 3. 提取原型 (KEY STEP)
+    const protos = findPrototypes(body, headingStyles);
 
-  const liveMapping = extractMapping(body, headingStyles, "live");
+    // 4. 定位正文区域并清空旧正文
+    // 策略：保留前置部分（摘要目录），保留后置部分（参考文献致谢），只替换中间的章节。
+    const children = Array.from(body.children);
+    let startDeleteIdx = -1;
+    let endDeleteIdx = -1;
 
-  // 2. Identify Prototypes (Styles) from existing mapping before deletion
-  // === UPDATED: Extended Prototypes ===
-  const protos: Record<number, Element | null> = { 1: null, 2: null, 3: null };
-  let genericProtoNormal: Element | null = null;
-  const extendedProtos: { caption: Element | null, equation: Element | null, table: Element | null } = {
-      caption: findCaptionPrototype(body),
-      equation: findEquationPrototype(body),
-      table: findTablePrototype(body)
-  };
-
-  for (const b of liveMapping.blocks) {
-     if (b.nodeType !== 'p') continue;
-     // Order is 1-based, child access is 0-based
-     const el = body.children[b.order - 1]; 
-     if (!el) continue;
-
-     if (!genericProtoNormal && b.kind === 'paragraph') {
-         genericProtoNormal = el;
-     }
-     if (b.kind === 'heading') {
-         if (!protos[b.level]) protos[b.level] = el;
-     }
-     if (protos[1] && protos[2] && protos[3] && genericProtoNormal) break; 
-  }
-  // Fallback
-  if (!genericProtoNormal && body.children.length > 0) genericProtoNormal = body.children[0];
-
-  // 3. Identify Range to Delete (Body Start -> Back Start)
-  const bodyH1 = liveMapping.sections.find(s => s.kind === "body" && s.level === 1);
-  const firstBack = liveMapping.sections.find(s => s.kind === "back");
-
-  let startIdx = bodyH1 ? bodyH1.startOrder - 1 : -1;
-  let endIdx = firstBack ? firstBack.startOrder - 1 : -1;
-
-  if (startIdx >= 0 && endIdx < 0) {
-    const kids = Array.from(body.children);
-    endIdx = kids.length;
-    for (let i = kids.length - 1; i >= 0; i--) {
-      if (kids[i].localName === "sectPr") {
-        endIdx = i;
-        break;
-      }
+    // 找 H1 章节开始
+    for (let i = 0; i < children.length; i++) {
+        const node = children[i];
+        if (node.localName === 'p') {
+            const sid = extractStyleId(node);
+            const txt = getParaTextRaw(node);
+            // 遇到第一个非 FrontMatter 的 H1 -> 正文开始
+            if (sid === headingStyles[1] && !isFrontMatterTitle(txt) && !isBackMatterTitle(txt)) {
+                startDeleteIdx = i;
+                break;
+            }
+        }
     }
-  }
 
-  // 4. Delete & Prepare Anchor
-  let anchorNode: Element | null = null;
-
-  if (startIdx >= 0 && endIdx > startIdx) {
-    const snapshot = Array.from(body.children);
-    anchorNode = snapshot[endIdx] ?? null; // The node *before* which we insert
-
-    // Delete everything in the body range
-    for (let i = startIdx; i < endIdx; i++) {
-      const n = snapshot[i];
-      if (n && n.parentNode === body) body.removeChild(n);
+    // 找 后置部分开始
+    for (let i = (startDeleteIdx === -1 ? 0 : startDeleteIdx); i < children.length; i++) {
+        const node = children[i];
+        if (node.localName === 'p') {
+            if (isBackMatterTitle(getParaTextRaw(node))) {
+                endDeleteIdx = i;
+                break;
+            }
+        }
+        if (node.localName === 'sectPr') {
+             endDeleteIdx = i; // End of section
+             break;
+        }
     }
-  } else {
-      anchorNode = body.lastElementChild;
-      if (anchorNode && anchorNode.localName !== 'sectPr') anchorNode = null; 
-  }
 
-  // 5. Recursive Generation
-  const generateLevel = (chapters: typeof thesis.chapters, level: number) => {
-      chapters.forEach(ch => {
-          const prototype = protos[level] || protos[1] || genericProtoNormal;
-          if (!prototype) return;
+    if (endDeleteIdx === -1) endDeleteIdx = children.length;
+    
+    // 如果找不到正文 H1，可能是一个空模版，直接插在 sectPr 前
+    let anchorNode: Node | null = null;
+    if (startDeleteIdx !== -1) {
+        // 删除旧章节
+        const toRemove = children.slice(startDeleteIdx, endDeleteIdx);
+        toRemove.forEach(n => body.removeChild(n));
+        anchorNode = children[endDeleteIdx]; // 插入点在后置部分之前
+    } else {
+        // Append at end (before sectPr)
+        const sectPr = getChildByTagNameNS(body, NS.w, "sectPr");
+        anchorNode = sectPr;
+    }
 
-          // A. Insert Heading
-          const newHeading = cloneParaSkeleton(prototype, doc);
-          const titleClean = stripHeadingNumbering(ch.title);
-          const sample = findFirstTextRun(prototype);
-          
-          newHeading.appendChild(makeRunTextLike(sample, titleClean, doc));
-          body.insertBefore(newHeading, anchorNode);
+    // 5. 写入新章节
+    const insertChapter = (ch: typeof thesis.chapters[0]) => {
+        let pTitle: Element | null = null;
+        const titleText = ch.title; // 此时 title 可能包含 "1.1 xxx"
 
-          // B. Insert Content (Blocks)
-          // === UPDATED: Pass Extended Prototypes ===
-          const contentNodes = createContentNodes(
-              ch.content || "[内容待生成]", 
-              doc, 
-              { normal: genericProtoNormal!, ...extendedProtos }
-          );
-          contentNodes.forEach(n => body.insertBefore(n, anchorNode));
+        if (ch.level === 1 && protos.h1) {
+             pTitle = cloneWithText(doc, protos.h1, titleText);
+        } else if (ch.level === 2 && protos.h2) {
+             pTitle = cloneWithText(doc, protos.h2, titleText);
+        } else if (ch.level === 3 && protos.h3) {
+             pTitle = cloneWithText(doc, protos.h3, titleText);
+        } else {
+             // Fallback
+             pTitle = cloneWithText(doc, protos.h1 || protos.normal!, titleText);
+        }
 
-          // C. Recurse for Subsections
-          if (ch.subsections) {
-              generateLevel(ch.subsections, level + 1);
-          }
-      });
-  };
+        if (pTitle) body.insertBefore(pTitle, anchorNode);
 
-  generateLevel(thesis.chapters, 1);
+        // 插入内容
+        if (ch.content) {
+            const contentNodes = createContentNodes(ch.content, doc, protos);
+            contentNodes.forEach(n => body.insertBefore(n, anchorNode));
+        }
 
-  // 6. Inject References (After "参考文献" title in Back Matter)
-  if (references.length > 0) {
-      const liveKids = Array.from(body.children);
-      let refHeader: Element | null = null;
-      for (const node of liveKids) {
-          const txt = getParaTextRaw(node);
-          if (isBackMatterTitle(txt) && normalizeForMatch(txt).includes("参考文献")) {
-              refHeader = node;
-              break;
-          }
-      }
+        // 递归
+        if (ch.subsections) ch.subsections.forEach(insertChapter);
+    };
 
-      if (refHeader) {
-          let refCursor = refHeader.nextSibling;
-          references.forEach(ref => {
-             const bm = `_Ref_${ref.id}`;
-             const p = cloneParaSkeleton(genericProtoNormal!, doc);
-             const sample = findFirstTextRun(genericProtoNormal!);
-             p.appendChild(createBookmark(doc, bm, globalId, "start"));
-             p.appendChild(makeRunTextLike(sample, `[${ref.id}] ${ref.description}`, doc));
-             p.appendChild(createBookmark(doc, bm, globalId, "end"));
-             
-             body.insertBefore(p, refCursor);
-             globalId++;
-          });
-      }
-  }
+    thesis.chapters.forEach(insertChapter);
 
-  // 7. Update Fields flag
-  const settingsPart = getPkgPart(doc, "/word/settings.xml");
-  if (settingsPart) {
-      const settingsRoot = getPartXmlRoot(settingsPart);
-      if (settingsRoot) {
-          let uf = getChildByTagNameNS(settingsRoot, NS.w, "updateFields");
-          if (!uf) {
-              uf = doc.createElementNS(NS.w, "w:updateFields");
-              settingsRoot.appendChild(uf);
-          }
-          uf.setAttributeNS(NS.w, "w:val", "true");
-      }
-  }
+    // 6. 插入参考文献
+    // 寻找“参考文献”标题节点
+    const currentKids = Array.from(body.children);
+    const refHeader = currentKids.find(n => {
+        if (n.localName !== 'p') return false;
+        const txt = getParaTextRaw(n);
+        return isBackMatterTitle(txt) && normalizeForMatch(txt).includes("参考文献");
+    });
 
-  return new XMLSerializer().serializeToString(doc);
+    if (refHeader && references.length > 0 && protos.refEntry) {
+        const insertRefAfter = refHeader.nextSibling;
+        references.forEach(ref => {
+            const bmId = (globalId++).toString();
+            const bmName = `_Ref_${ref.id}_target`;
+            
+            // Clone Ref Proto
+            const pRef = protos.refEntry!.cloneNode(true) as Element;
+            // Clear content, keep pPr
+            const pPr = getChildByTagNameNS(pRef, NS.w, "pPr");
+            while (pRef.firstChild) pRef.removeChild(pRef.firstChild);
+            if (pPr) pRef.appendChild(pPr);
+            
+            // Sample Run
+            let sampleRun = getChildByTagNameNS(protos.refEntry!, NS.w, "r");
+            if (!sampleRun) sampleRun = doc.createElementNS(NS.w, "w:r"); // fallback
+
+            // Construct: BM_Start -> Text -> BM_End
+            pRef.appendChild(createBookmark(doc, bmName, bmId, "start"));
+            
+            const r = sampleRun!.cloneNode(true) as Element;
+            const rPr = getChildByTagNameNS(r, NS.w, "rPr");
+            while(r.firstChild) r.removeChild(r.firstChild);
+            if(rPr) r.appendChild(rPr);
+            const t = doc.createElementNS(NS.w, "w:t");
+            t.setAttribute("xml:space", "preserve");
+            t.textContent = `[${ref.id}] ${ref.description}`;
+            r.appendChild(t);
+            pRef.appendChild(r);
+
+            pRef.appendChild(createBookmark(doc, bmName, bmId, "end"));
+
+            body.insertBefore(pRef, insertRefAfter);
+        });
+    }
+
+    // 7. 更新 Fields
+    const settingsPart = getPkgPart(doc, "/word/settings.xml");
+    if (settingsPart) {
+        const settingsRoot = getPartXmlRoot(settingsPart);
+        if (settingsRoot) {
+            let uf = getChildByTagNameNS(settingsRoot, NS.w, "updateFields");
+            if (!uf) {
+                uf = doc.createElementNS(NS.w, "w:updateFields");
+                settingsRoot.appendChild(uf);
+            }
+            uf.setAttributeNS(NS.w, "w:val", "true");
+        }
+    }
+
+    return new XMLSerializer().serializeToString(doc);
 };
