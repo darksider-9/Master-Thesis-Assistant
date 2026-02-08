@@ -170,15 +170,15 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
 
   const renderPreviewContent = (content: string) => {
      if (!content) return null;
-     // Split by new placeholders [[FIG:...]] or [[TBL:...]]
+     // Split by new placeholders [[FIG:...]] or [[TBL:...]] or [[EQ:...]]
      return content.split(/(\[\[.*?\]\]|\n)/g)
       .filter(p => p.trim())
       .map((part, i) => {
           if (part.startsWith("[[FIG:")) {
              const desc = part.replace("[[FIG:", "").replace("]]", "");
              return (
-               <div key={i} className="my-2 p-3 bg-blue-50 border border-blue-100 rounded text-center">
-                  <div className="w-20 h-20 bg-blue-200 mx-auto mb-2 flex items-center justify-center text-blue-400">IMG</div>
+               <div key={i} className="my-2 p-3 bg-blue-50 border border-blue-100 rounded text-center shadow-sm">
+                  <div className="w-20 h-20 bg-blue-100 mx-auto mb-2 flex items-center justify-center text-blue-400 rounded">IMG</div>
                   <div className="text-xs font-bold text-blue-600">图 X-X: {desc}</div>
                </div>
              );
@@ -186,15 +186,24 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
           if (part.startsWith("[[TBL:")) {
              const desc = part.replace("[[TBL:", "").replace("]]", "");
              return (
-               <div key={i} className="my-2 p-3 bg-green-50 border border-green-100 rounded text-center">
+               <div key={i} className="my-2 p-3 bg-green-50 border border-green-100 rounded text-center shadow-sm">
                   <div className="text-xs font-bold text-green-600 mb-1">表 X-X: {desc}</div>
-                  <div className="grid grid-cols-3 gap-1 opacity-50 text-[10px]">
+                  <div className="grid grid-cols-3 gap-1 opacity-50 text-[10px] w-1/2 mx-auto">
                      <div className="bg-green-200 h-4"></div><div className="bg-green-200 h-4"></div><div className="bg-green-200 h-4"></div>
                      <div className="bg-white border h-4"></div><div className="bg-white border h-4"></div><div className="bg-white border h-4"></div>
                   </div>
                </div>
              );
           }
+          if (part.startsWith("[[EQ:")) {
+            const content = part.replace("[[EQ:", "").replace("]]", "");
+            return (
+              <div key={i} className="my-2 p-3 bg-slate-50 border border-slate-200 rounded text-center font-mono text-xs">
+                 {content}
+                 <div className="text-[10px] text-slate-400 mt-1">(公式 X.X)</div>
+              </div>
+            );
+         }
           return <p key={i} className="text-sm text-slate-700 leading-relaxed mb-2 indent-8 text-justify">{part}</p>;
       });
   };

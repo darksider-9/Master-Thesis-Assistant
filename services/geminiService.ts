@@ -2,27 +2,169 @@
 import { GoogleGenAI } from "@google/genai";
 import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings } from "../types";
 
-// Helper to create a dynamic client based on settings
-const getClient = (settings: ApiSettings) => {
-  if (!settings.apiKey) {
-    throw new Error("请先在设置中配置 API Key");
-  }
-  
-  const config: any = { apiKey: settings.apiKey };
-  if (settings.baseUrl) {
-    config.baseUrl = settings.baseUrl;
-  }
+// --- OpenAI Compatible Interface ---
 
-  return new GoogleGenAI(config);
+// Helper to clean Markdown JSON code blocks
+const cleanJsonText = (text: string) => {
+  return text.replace(/^```json\s*/, '').replace(/^```\s*/, '').replace(/\s*```$/, '');
 };
 
-// --- Helpers ---
 const cleanMarkdownArtifacts = (text: string) => {
   return text
     .replace(/\*\*(.*?)\*\*/g, '$1') 
     .replace(/\*(.*?)\*/g, '$1')     
     .replace(/^#+\s+/gm, '')         
     .replace(/`/g, '');              
+};
+
+// Generic Generator Interface
+interface GenerationRequest {
+    systemPrompt: string;
+    userPrompt?: string; // For single turn
+    history?: ChatMessage[]; // For multi-turn
+    jsonMode?: boolean;
+}
+
+// The Unified Caller
+const generateContentUnified = async (
+    settings: ApiSettings,
+    req: GenerationRequest
+): Promise<string> => {
+    
+    // CASE A: OpenAI Compatible (Custom Base URL)
+    if (settings.baseUrl && settings.baseUrl.trim() !== "") {
+        try {
+            let url = settings.baseUrl.trim();
+            // Normalize URL: Ensure it doesn't end with slash
+            if (url.endsWith('/')) url = url.slice(0, -1);
+            // Append standard chat completions endpoint if not present
+            if (!url.endsWith('/chat/completions')) {
+                // If user entered ".../v1", append "/chat/completions"
+                // If user entered root, append "/v1/chat/completions" (heuristic)
+                if (url.endsWith('/v1')) {
+                    url = `${url}/chat/completions`;
+                } else {
+                    // Try to be smart: usually proxies give the root.
+                    // We will append /chat/completions and hope the user provided the full path to the API root (e.g. .../v1)
+                    // Or we just append /chat/completions assuming the user pasted the full base.
+                    url = `${url}/chat/completions`;
+                }
+            }
+
+            const messages: any[] = [
+                { role: "system", content: req.systemPrompt }
+            ];
+
+            if (req.history) {
+                req.history.forEach(h => {
+                    messages.push({ role: h.role, content: h.content });
+                });
+            }
+
+            if (req.userPrompt) {
+                messages.push({ role: "user", content: req.userPrompt });
+            }
+
+            const payload: any = {
+                model: settings.modelName,
+                messages: messages,
+                stream: false
+            };
+
+            if (req.jsonMode) {
+                payload.response_format = { type: "json_object" };
+            }
+
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${settings.apiKey}`
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                const errText = await response.text();
+                throw new Error(`OpenAI API Error (${response.status}): ${errText}`);
+            }
+
+            const data = await response.json();
+            const content = data.choices?.[0]?.message?.content || "";
+            return content;
+
+        } catch (e) {
+            console.error("OpenAI Compatible Call Failed", e);
+            throw e;
+        }
+    } 
+    // CASE B: Official Google GenAI SDK
+    else {
+        const ai = new GoogleGenAI({ apiKey: settings.apiKey });
+        
+        let contents: any = "";
+        
+        // Convert history to Google format if present
+        if (req.history && req.history.length > 0) {
+            // Google SDK expects a specific chat structure or simple contents.
+            // For generateContent, we can pass text. For chat, we need history.
+            // Here we flatten to a simple prompt strategy for simplicity in "generateContent", 
+            // OR we assume the caller wants a stateless call (like Supervisor).
+            // For multi-turn with history, strict mapping is needed.
+            
+            // However, the Google SDK `generateContent` takes `contents` which can be multi-part.
+            // But it doesn't automatically handle "history" objects unless we use `ai.chats.create`.
+            // To keep it unified with the OpenAI logic above (which is stateless HTTP), 
+            // we will construct the prompt by appending history to the prompt text 
+            // OR use the Chat session if strictly required. 
+            // Given the complexity, we'll serialize history into the text for the simple `generateContent` call
+            // unless we really need `startChat`. 
+            // Let's use `startChat` logic for history cases?
+            // Actually, simply concatenating history into the "contents" string is often robust enough for simple agents,
+            // but let's try to map it to `Content` objects if possible.
+            
+            // Simplified approach for Google SDK (Stateless):
+            // System instruction is separate.
+            // History is manually managed in the prompt context? 
+            // No, Google SDK supports `systemInstruction`.
+            
+            // Let's stick to the prompt engineering approach for history to keep it simple across both:
+            // "Here is the history:\nUser:...\nAssistant:..."
+            
+            // Wait, the prompt requirements say "Use ai.models.generateContent".
+            // Let's construct a Chat session if history exists? No, the requirement is generateContent.
+            // We will format the history into the prompt string.
+            
+            let fullPrompt = "";
+            req.history.forEach(h => {
+                fullPrompt += `${h.role === 'user' ? 'User' : 'Model'}: ${h.content}\n`;
+            });
+            if (req.userPrompt) {
+                fullPrompt += `User: ${req.userPrompt}\n`;
+            }
+            contents = fullPrompt.trim();
+            
+            // If history is empty but userPrompt exists
+            if (!contents && req.userPrompt) contents = req.userPrompt;
+        } else {
+             contents = req.userPrompt || "";
+        }
+
+        try {
+            const res = await ai.models.generateContent({
+                model: settings.modelName,
+                contents: contents,
+                config: {
+                    systemInstruction: req.systemPrompt,
+                    responseMimeType: req.jsonMode ? "application/json" : "text/plain"
+                }
+            });
+            return res.text || "";
+        } catch (e) {
+             console.error("Google GenAI Call Failed", e);
+             throw e;
+        }
+    }
 };
 
 // --- Supervisor Agent (Structure Design) ---
@@ -32,8 +174,9 @@ export const chatWithSupervisor = async (
   currentStructure: any,
   settings: ApiSettings
 ): Promise<{ reply: string, updatedStructure?: any }> => {
-  const ai = getClient(settings);
-  const historyText = history.map(h => `${h.role}: ${h.content}`).join("\n");
+  const historyText = history.slice(0, -1).map(h => `${h.role}: ${h.content}`).join("\n");
+  const lastMsg = history[history.length - 1];
+
   const fewShotExample = `
 {
   "reply": "根据您的要求，我调整了第三章的结构...",
@@ -66,32 +209,31 @@ export const chatWithSupervisor = async (
     ${fewShotExample}
     
     当前结构: ${JSON.stringify(currentStructure)}
-    对话历史: ${historyText}
-    请回复 JSON:
   `;
 
   try {
-    const response = await ai.models.generateContent({
-      model: settings.modelName,
-      contents: systemPrompt,
-      config: { responseMimeType: "application/json" }
+    const text = await generateContentUnified(settings, {
+        systemPrompt,
+        userPrompt: lastMsg.content, // Pass only the new message as prompt, history is context? 
+        // Logic fix: generateContentUnified for Google combines history. 
+        // For OpenAI, we need explicit history array.
+        history: history.slice(0, -1),
+        jsonMode: true
     });
-    return JSON.parse(response.text || "{}");
+    return JSON.parse(cleanJsonText(text) || "{}");
   } catch (e) {
     console.error(e);
     return { reply: `（系统提示：API调用失败 - ${e instanceof Error ? e.message : '未知错误'}）` };
   }
 };
 
-// --- Methodology Supervisor Agent (Autonomous Context Aware) ---
+// --- Methodology Supervisor Agent ---
 export const chatWithMethodologySupervisor = async (
   history: ChatMessage[],
   thesisTitle: string,
   chapter: Chapter,
   settings: ApiSettings
 ): Promise<{ reply: string, finalizedMetadata?: InterviewData }> => {
-  const ai = getClient(settings);
-  const historyText = history.map(h => `${h.role}: ${h.content}`).join("\n");
   
   const getStructureText = (ch: Chapter, prefix = ""): string => {
     let text = `${prefix}${ch.title}\n`;
@@ -104,6 +246,7 @@ export const chatWithMethodologySupervisor = async (
   };
 
   const chapterStructure = getStructureText(chapter);
+  const lastMsg = history[history.length - 1];
 
   const systemPrompt = `
     角色：专业的硕士导师/审稿人。
@@ -131,25 +274,23 @@ export const chatWithMethodologySupervisor = async (
          ... // 只有在对话结束/信息收集完毕时才返回此字段
       }
     }
-    
-    对话历史:
-    ${historyText}
   `;
 
   try {
-    const response = await ai.models.generateContent({
-      model: settings.modelName,
-      contents: systemPrompt,
-      config: { responseMimeType: "application/json" }
+    const text = await generateContentUnified(settings, {
+        systemPrompt,
+        userPrompt: lastMsg.content,
+        history: history.slice(0, -1),
+        jsonMode: true
     });
-    return JSON.parse(response.text || "{}");
+    return JSON.parse(cleanJsonText(text) || "{}");
   } catch (e) {
     console.error(e);
     return { reply: `（API 错误: ${e instanceof Error ? e.message : '未知错误'}）` };
   }
 };
 
-// --- Single Section Writer (Granular Control) ---
+// --- Single Section Writer ---
 
 interface WriteSectionContext {
   thesisTitle: string;
@@ -163,8 +304,7 @@ interface WriteSectionContext {
 }
 
 export const writeSingleSection = async (ctx: WriteSectionContext) => {
-  const { thesisTitle, chapterLevel1, targetSection, userInstructions, formatRules, settings, discussionHistory } = ctx;
-  const ai = getClient(settings);
+  const { thesisTitle, chapterLevel1, targetSection, userInstructions, settings, discussionHistory } = ctx;
 
   const isLevel1 = targetSection.level === 1;
 
@@ -200,8 +340,9 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
     2. **特殊对象占位符** (解析器将自动将其转换为复杂的Word格式):
        - 插入图片：[[FIG:图片描述]]  (例如: [[FIG:U-Net网络结构图]])
        - 插入表格：[[TBL:表格描述]]
+       - 插入公式：[[EQ:公式内容]]
        - 插入引用：[[REF:引用ID]] (例如: [[REF:1]])
-       - 不要使用Markdown图片或表格语法。
+       - **绝对禁止**使用 Markdown 图片或表格语法。
     3. **段落**：普通文本段落之间用换行符分隔即可。不要使用 XML/HTML 标签。
     4. **字数**：300-800 字。
 
@@ -209,21 +350,19 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
   `;
 
   try {
-    const response = await ai.models.generateContent({
-      model: settings.modelName,
-      contents: systemPrompt,
+    const text = await generateContentUnified(settings, {
+        systemPrompt,
+        userPrompt: "请开始撰写本小节内容",
+        jsonMode: false
     });
-
-    let rawText = response.text || "";
-    rawText = cleanMarkdownArtifacts(rawText);
-    return rawText;
+    return cleanMarkdownArtifacts(text);
   } catch (e) {
     console.error(e);
     throw new Error(`撰写失败: ${e instanceof Error ? e.message : '未知错误'}`);
   }
 };
 
-// --- Post-Processing Agents (Chapter Completion) ---
+// --- Post-Processing Agents ---
 
 export const runPostProcessingAgents = async (
   fullChapterText: string,
@@ -233,13 +372,9 @@ export const runPostProcessingAgents = async (
     newReferences: Reference[];
     newTerms: TechnicalTerm[];
 }> => {
-   const ai = getClient(settings);
    
-   const prompt = `
+   const systemPrompt = `
      You are a Quality Assurance Agent Cluster.
-     Input Text (Raw Content):
-     ${fullChapterText.slice(0, 15000)}
-
      Tasks:
      1. **Syntax Check**: Ensure specific placeholders are correctly formatted: [[FIG:Desc]], [[TBL:Desc]], [[REF:ID]]. 
      2. **Term Check**: Extract technical terms.
@@ -257,14 +392,16 @@ export const runPostProcessingAgents = async (
      }
    `;
 
+   const userPrompt = `Input Text (Raw Content):\n${fullChapterText.slice(0, 15000)}`;
+
    try {
-     const response = await ai.models.generateContent({
-        model: settings.modelName,
-        contents: prompt,
-        config: { responseMimeType: "application/json" }
+     const text = await generateContentUnified(settings, {
+         systemPrompt,
+         userPrompt,
+         jsonMode: true
      });
      
-     const result = JSON.parse(response.text || "{}");
+     const result = JSON.parse(cleanJsonText(text) || "{}");
      return {
         polishedText: result.polishedText || fullChapterText,
         newReferences: result.references || [],
@@ -282,6 +419,5 @@ export const repairChapterFormatting = async (
   formatRules: FormatRules,
   settings: ApiSettings
 ) => {
-   // Deprecated in favor of strict placeholder syntax
    return rawContent;
 };

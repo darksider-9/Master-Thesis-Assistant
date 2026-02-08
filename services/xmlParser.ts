@@ -20,7 +20,7 @@ const NS = {
   v: "urn:schemas-microsoft-com:vml"
 };
 
-const FIVE_SZ = "21"; // 10.5pt
+const FIVE_SZ = "21"; // 10.5pt (五号字)
 
 // -------------------- Text Normalization --------------------
 const normalizeTitle = (s: string) =>
@@ -110,7 +110,9 @@ const hasImageLike = (p: Element) =>
 const hasFieldSEQ = (p: Element) => getInstrTexts(p).some(t => /\bSEQ\b/.test(t));
 const hasFieldREF = (p: Element) => getInstrTexts(p).some(t => /\bREF\b/.test(t));
 
-// -------------------- DOM Construction Helpers --------------------
+// -------------------- Low-Level XML Construction --------------------
+
+// 1. Clone a paragraph but keep ONLY pPr (properties), remove all content
 const cloneParaSkeleton = (p: Element, doc: Document) => {
   const clone = p.cloneNode(true) as Element;
   const pPr = getChildByTagNameNS(clone, NS.w, "pPr");
@@ -119,6 +121,7 @@ const cloneParaSkeleton = (p: Element, doc: Document) => {
   return clone;
 };
 
+// 2. Ensure run has standard font size (Five / 10.5pt)
 const ensureRunFiveSize = (r: Element, doc: Document) => {
   let rPr = getChildByTagNameNS(r, NS.w, "rPr");
   if (!rPr) {
@@ -146,8 +149,10 @@ const findFirstTextRun = (p: Element): Element | null => {
   return rs.length > 0 ? rs[0] : null;
 };
 
+// 3. Create a Run with Text
 const makeRunTextLike = (sampleRun: Element | null, text: string, doc: Document) => {
   const r = sampleRun ? (sampleRun.cloneNode(true) as Element) : doc.createElementNS(NS.w, "w:r");
+  // Clean content except rPr
   const rPr = getChildByTagNameNS(r, NS.w, "rPr");
   while (r.lastChild) {
     if (r.lastChild === rPr) break;
@@ -161,6 +166,7 @@ const makeRunTextLike = (sampleRun: Element | null, text: string, doc: Document)
   return r;
 };
 
+// 4. Create Field Char (begin/separate/end)
 const makeRunFldCharLike = (sampleRun: Element | null, fldCharType: string, doc: Document) => {
   const r = sampleRun ? (sampleRun.cloneNode(true) as Element) : doc.createElementNS(NS.w, "w:r");
   const rPr = getChildByTagNameNS(r, NS.w, "rPr");
@@ -175,6 +181,7 @@ const makeRunFldCharLike = (sampleRun: Element | null, fldCharType: string, doc:
   return r;
 };
 
+// 5. Create Instruction Text (e.g. "SEQ Figure")
 const makeRunInstrLike = (sampleRun: Element | null, instr: string, doc: Document) => {
   const r = sampleRun ? (sampleRun.cloneNode(true) as Element) : doc.createElementNS(NS.w, "w:r");
   const rPr = getChildByTagNameNS(r, NS.w, "rPr");
@@ -190,6 +197,7 @@ const makeRunInstrLike = (sampleRun: Element | null, instr: string, doc: Documen
   return r;
 };
 
+// 6. Create Full Field Sequence (Begin -> Instr -> Separate -> Placeholder -> End)
 const createFieldRuns = (doc: Document, sampleRun: Element | null, instr: string, placeholder: string) => {
   return [
     makeRunFldCharLike(sampleRun, "begin", doc),
@@ -578,29 +586,108 @@ export const parseWordXML = (xmlString: string): FormatRules => {
 // -------------------- Generation Logic --------------------
 let globalId = 60000;
 
-// Returns an array of elements (paragraphs) to insert
-const createContentNodes = (contentRaw: string, doc: Document, protoNormal: Element): Element[] => {
+// === ADDED: New Helper to find Table Prototypes ===
+const createTableNodeTS = (doc: Document, proto: Element | null): Element => {
+  const tbl = doc.createElementNS(NS.w, "w:tbl");
+  const tblPr = doc.createElementNS(NS.w, "w:tblPr");
+  const tblW = doc.createElementNS(NS.w, "w:tblW");
+  tblW.setAttributeNS(NS.w, "w:type", "dxa");
+  tblW.setAttributeNS(NS.w, "w:w", "9000"); // Approx page width
+  tblPr.appendChild(tblW);
+  
+  // Center table
+  const tblJc = doc.createElementNS(NS.w, "w:tblJc");
+  tblJc.setAttributeNS(NS.w, "w:val", "center");
+  tblPr.appendChild(tblJc);
+  
+  // Borders
+  const tblBorders = doc.createElementNS(NS.w, "w:tblBorders");
+  ['top', 'bottom', 'left', 'right', 'insideH', 'insideV'].forEach(border => {
+      const b = doc.createElementNS(NS.w, `w:${border}`);
+      b.setAttributeNS(NS.w, "w:val", "single");
+      b.setAttributeNS(NS.w, "w:sz", "4");
+      tblBorders.appendChild(b);
+  });
+  tblPr.appendChild(tblBorders);
+  tbl.appendChild(tblPr);
+
+  // Use prototype if provided to clone style
+  if (proto) {
+      // Logic to copy table properties if needed
+  }
+
+  // Create a 2x2 grid
+  for(let i=0; i<2; i++) {
+      const tr = doc.createElementNS(NS.w, "w:tr");
+      for(let j=0; j<2; j++) {
+          const tc = doc.createElementNS(NS.w, "w:tc");
+          const tcPr = doc.createElementNS(NS.w, "w:tcPr");
+          const tcW = doc.createElementNS(NS.w, "w:tcW");
+          tcW.setAttributeNS(NS.w, "w:type", "dxa");
+          tcW.setAttributeNS(NS.w, "w:w", "4500");
+          tcPr.appendChild(tcW);
+          tc.appendChild(tcPr);
+          
+          const p = doc.createElementNS(NS.w, "w:p");
+          setParaCenter(p, doc);
+          p.appendChild(makeRunTextLike(null, i===0 ? "Header" : "Data", doc));
+          tc.appendChild(p);
+          tr.appendChild(tc);
+      }
+      tbl.appendChild(tr);
+  }
+  return tbl;
+};
+
+// === ADDED: New Finders ===
+const findEquationPrototype = (body: Element): Element | null => {
+  const ps = body.getElementsByTagNameNS(NS.w, "p");
+  for (let i = 0; i < ps.length; i++) {
+      if (hasOMML(ps[i])) return ps[i];
+  }
+  return null;
+};
+
+const findCaptionPrototype = (body: Element): Element | null => {
+  const ps = body.getElementsByTagNameNS(NS.w, "p");
+  for (let i = 0; i < ps.length; i++) {
+      if (hasFieldSEQ(ps[i])) return ps[i];
+  }
+  return null;
+};
+
+const findTablePrototype = (body: Element): Element | null => {
+    const tbls = body.getElementsByTagNameNS(NS.w, "tbl");
+    return tbls.length > 0 ? tbls[0] : null;
+};
+
+// === UPDATED: Use Prototypes in CreateContentNodes ===
+const createContentNodes = (
+    contentRaw: string, 
+    doc: Document, 
+    protos: { normal: Element, caption: Element | null, equation: Element | null, table: Element | null }
+): Element[] => {
     const nodes: Element[] = [];
     if (!contentRaw) return nodes;
 
-    const sample = findFirstTextRun(protoNormal);
+    const sample = findFirstTextRun(protos.normal);
     const parts = contentRaw.split(/(\[\[.*?\]\])/g);
 
     parts.forEach(part => {
         if (!part.trim()) return;
 
         if (part.startsWith("[[FIG:")) {
-            const desc = part.replace("[[FIG:", "").replace("]]", "");
+            const desc = part.replace(/^\[\[FIG:/, "").replace(/\]\]$/, "");
             const bm = `_Fig_${globalId}`;
             
             // Image Placeholder
-            const pImg = cloneParaSkeleton(protoNormal, doc);
+            const pImg = cloneParaSkeleton(protos.normal, doc);
             setParaCenter(pImg, doc);
             pImg.appendChild(makeRunTextLike(sample, "[图片占位]", doc));
             nodes.push(pImg);
 
             // Caption
-            const pFig = cloneParaSkeleton(protoNormal, doc);
+            const pFig = cloneParaSkeleton(protos.caption || protos.normal, doc);
             setParaCenter(pFig, doc);
             pFig.appendChild(createBookmark(doc, bm, globalId, "start"));
             pFig.appendChild(makeRunTextLike(sample, "图 ", doc));
@@ -613,11 +700,11 @@ const createContentNodes = (contentRaw: string, doc: Document, protoNormal: Elem
             globalId++;
 
         } else if (part.startsWith("[[TBL:")) {
-            const desc = part.replace("[[TBL:", "").replace("]]", "");
+            const desc = part.replace(/^\[\[TBL:/, "").replace(/\]\]$/, "");
             const bm = `_Tbl_${globalId}`;
 
-            // Caption
-            const pTbl = cloneParaSkeleton(protoNormal, doc);
+            // Caption (usually above table)
+            const pTbl = cloneParaSkeleton(protos.caption || protos.normal, doc);
             setParaCenter(pTbl, doc);
             pTbl.appendChild(createBookmark(doc, bm, globalId, "start"));
             pTbl.appendChild(makeRunTextLike(sample, "表 ", doc));
@@ -628,15 +715,44 @@ const createContentNodes = (contentRaw: string, doc: Document, protoNormal: Elem
             pTbl.appendChild(makeRunTextLike(sample, "  " + desc, doc));
             nodes.push(pTbl);
 
-            // Table Placeholder
-            const pGrid = cloneParaSkeleton(protoNormal, doc);
-            setParaCenter(pGrid, doc);
-            pGrid.appendChild(makeRunTextLike(sample, "[表格占位]", doc));
-            nodes.push(pGrid);
+            // Table
+            nodes.push(createTableNodeTS(doc, protos.table));
             globalId++;
 
+        } else if (part.startsWith("[[EQ:")) {
+            const content = part.replace(/^\[\[EQ:/, "").replace(/\]\]$/, "");
+            const bm = `_Eq_${globalId}`;
+            
+            // Equation Paragraph
+            // If we have an equation prototype, try to clone it, otherwise use normal
+            const pEq = protos.equation ? (protos.equation.cloneNode(true) as Element) : cloneParaSkeleton(protos.normal, doc);
+            // Simple approach: append text if we can't fully parse OMML
+            setParaCenter(pEq, doc);
+            
+            // Clean content if cloned
+            if (protos.equation) {
+                // Clear existing runs but keep OMML if possible? No, difficult.
+                // Fallback to text representation for now
+                while(pEq.firstChild) pEq.removeChild(pEq.firstChild);
+                // Re-add pPr
+                const pPr = getChildByTagNameNS(protos.equation, NS.w, "pPr");
+                if (pPr) pEq.appendChild(pPr.cloneNode(true));
+            }
+
+            pEq.appendChild(makeRunTextLike(sample, content + "    ", doc));
+            pEq.appendChild(createBookmark(doc, bm, globalId, "start"));
+            pEq.appendChild(makeRunTextLike(sample, "(", doc));
+            createFieldRuns(doc, sample, "STYLEREF 1 \\s", "X").forEach(r => pEq.appendChild(r));
+            pEq.appendChild(makeRunTextLike(sample, ".", doc));
+            createFieldRuns(doc, sample, "SEQ equation \\* ARABIC \\s 1", "1").forEach(r => pEq.appendChild(r));
+            pEq.appendChild(makeRunTextLike(sample, ")", doc));
+            pEq.appendChild(createBookmark(doc, bm, globalId, "end"));
+            
+            nodes.push(pEq);
+            globalId++;
+            
         } else {
-            const p = cloneParaSkeleton(protoNormal, doc);
+            const p = cloneParaSkeleton(protos.normal, doc);
             const refParts = part.split(/(\[\[REF:\d+\]\])/);
             refParts.forEach(rp => {
                 const m = rp.match(/\[\[REF:(\d+)\]\]/);
@@ -680,8 +796,14 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
   const liveMapping = extractMapping(body, headingStyles, "live");
 
   // 2. Identify Prototypes (Styles) from existing mapping before deletion
+  // === UPDATED: Extended Prototypes ===
   const protos: Record<number, Element | null> = { 1: null, 2: null, 3: null };
   let genericProtoNormal: Element | null = null;
+  const extendedProtos: { caption: Element | null, equation: Element | null, table: Element | null } = {
+      caption: findCaptionPrototype(body),
+      equation: findEquationPrototype(body),
+      table: findTablePrototype(body)
+  };
 
   for (const b of liveMapping.blocks) {
      if (b.nodeType !== 'p') continue;
@@ -750,7 +872,12 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
           body.insertBefore(newHeading, anchorNode);
 
           // B. Insert Content (Blocks)
-          const contentNodes = createContentNodes(ch.content || "[内容待生成]", doc, genericProtoNormal!);
+          // === UPDATED: Pass Extended Prototypes ===
+          const contentNodes = createContentNodes(
+              ch.content || "[内容待生成]", 
+              doc, 
+              { normal: genericProtoNormal!, ...extendedProtos }
+          );
           contentNodes.forEach(n => body.insertBefore(n, anchorNode));
 
           // C. Recurse for Subsections

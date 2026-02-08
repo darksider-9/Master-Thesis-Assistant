@@ -18,6 +18,16 @@ const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onClose, se
     }
   }, [isOpen, settings]);
 
+  const handleReset = () => {
+      // Reset to potentially env vars or empty
+      const defaultKey = (typeof process !== 'undefined' && process.env && process.env.API_KEY) ? process.env.API_KEY : '';
+      setFormData({
+          apiKey: defaultKey,
+          baseUrl: '',
+          modelName: 'gemini-3-pro-preview'
+      });
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -54,7 +64,7 @@ const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onClose, se
               value={formData.baseUrl || ''}
               onChange={e => setFormData({...formData, baseUrl: e.target.value})}
             />
-            <p className="text-[10px] text-slate-400 mt-1">如果您使用代理地址，请在此填写。</p>
+            <p className="text-[10px] text-slate-400 mt-1">如果您使用国内代理，请在此填写 (例如: https://api.proxy.com)</p>
           </div>
 
           <div>
@@ -66,12 +76,12 @@ const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onClose, se
               value={formData.modelName}
               onChange={e => setFormData({...formData, modelName: e.target.value})}
             />
-            <div className="flex gap-2 mt-2">
+            <div className="flex gap-2 mt-2 flex-wrap">
                 {['gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-flash-preview'].map(m => (
                     <button 
                         key={m}
                         onClick={() => setFormData({...formData, modelName: m})}
-                        className="text-[10px] bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded border border-slate-200"
+                        className={`text-[10px] px-2 py-1 rounded border ${formData.modelName === m ? 'bg-blue-100 border-blue-300 text-blue-700' : 'bg-slate-100 border-slate-200 text-slate-600'}`}
                     >
                         {m}
                     </button>
@@ -80,19 +90,27 @@ const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onClose, se
           </div>
         </div>
 
-        <div className="p-4 bg-slate-50 border-t flex justify-end gap-3">
+        <div className="p-4 bg-slate-50 border-t flex justify-between items-center">
           <button 
-            onClick={onClose}
-            className="px-4 py-2 text-slate-600 hover:bg-slate-200 rounded-lg text-sm font-medium transition-colors"
+            onClick={handleReset}
+            className="text-xs text-slate-400 hover:text-red-500 underline decoration-dotted"
           >
-            取消
+            重置默认
           </button>
-          <button 
-            onClick={() => { onSave(formData); onClose(); }}
-            className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-bold shadow-md transition-colors"
-          >
-            保存配置
-          </button>
+          <div className="flex gap-3">
+              <button 
+                onClick={onClose}
+                className="px-4 py-2 text-slate-600 hover:bg-slate-200 rounded-lg text-sm font-medium transition-colors"
+              >
+                取消
+              </button>
+              <button 
+                onClick={() => { onSave(formData); onClose(); }}
+                className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-bold shadow-md transition-colors"
+              >
+                保存配置
+              </button>
+          </div>
         </div>
       </div>
     </div>
