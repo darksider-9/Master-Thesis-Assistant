@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Step, FormatRules, ThesisStructure, Chapter, Reference, ProjectState, ApiSettings } from './types';
+import { Step, FormatRules, ThesisStructure, Chapter, Reference, ProjectState, ApiSettings, UsageStats, AgentLog, TokenUsage } from './types';
 import { parseWordXML, generateThesisXML } from './services/xmlParser';
 import Sidebar from './components/Sidebar';
 import FormatAnalyzer from './components/FormatAnalyzer';
@@ -11,6 +11,18 @@ import Previewer from './components/Previewer';
 import TitleConfirm from './components/TitleConfirm';
 import ApiSettingsModal from './components/ApiSettingsModal';
 
+const INITIAL_USAGE: UsageStats = {
+    totalCalls: 0,
+    totalPromptTokens: 0,
+    totalCompletionTokens: 0,
+    byPhase: {
+        structure: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        discussion: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        writing: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        review: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    }
+};
+
 const App: React.FC = () => {
   const [currentStep, setCurrentStep] = useState<Step>('upload');
   const [formatRules, setFormatRules] = useState<FormatRules | null>(null);
@@ -19,6 +31,10 @@ const App: React.FC = () => {
     chapters: []
   });
   const [references, setReferences] = useState<Reference[]>([]);
+  
+  // Global Persistence State
+  const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
+  const [usageStats, setUsageStats] = useState<UsageStats>(INITIAL_USAGE);
 
   // API Settings State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -50,9 +66,53 @@ const App: React.FC = () => {
   }, []);
 
   const handleSaveSettings = (newSettings: ApiSettings) => {
-    setApiSettings(newSettings);
+    setApiSettings(prev => ({ ...prev, ...newSettings }));
     localStorage.setItem('thesis_api_settings', JSON.stringify(newSettings));
   };
+
+  // --- Global Logging & Stats Handlers ---
+
+  const addAgentLog = (agent: AgentLog['agentName'], message: string, status: AgentLog['status'] = 'processing') => {
+    setAgentLogs(prev => [...prev, {
+      id: Date.now().toString() + Math.random(),
+      agentName: agent,
+      message,
+      timestamp: Date.now(),
+      status
+    }]);
+  };
+
+  const handleUsageUpdate = (usage: TokenUsage) => {
+      setUsageStats(prev => {
+          // Identify phase based on currentStep
+          let phaseKey: keyof UsageStats['byPhase'] = 'writing';
+          if (currentStep === 'structure') phaseKey = 'structure';
+          if (currentStep === 'discussion') phaseKey = 'discussion';
+          
+          const currentPhaseStats = prev.byPhase[phaseKey];
+
+          return {
+              totalCalls: prev.totalCalls + 1,
+              totalPromptTokens: prev.totalPromptTokens + usage.promptTokens,
+              totalCompletionTokens: prev.totalCompletionTokens + usage.completionTokens,
+              byPhase: {
+                  ...prev.byPhase,
+                  [phaseKey]: {
+                      promptTokens: currentPhaseStats.promptTokens + usage.promptTokens,
+                      completionTokens: currentPhaseStats.completionTokens + usage.completionTokens,
+                      totalTokens: currentPhaseStats.totalTokens + usage.totalTokens
+                  }
+              }
+          };
+      });
+  };
+
+  // Inject callback into settings passed down to components
+  const settingsWithCallback: ApiSettings = {
+      ...apiSettings,
+      onUsage: handleUsageUpdate
+  };
+
 
   const handleFileUpload = (xmlContent: string) => {
     try {
@@ -70,23 +130,15 @@ const App: React.FC = () => {
   };
 
   // Critical: This function is called when Structure is Confirmed in Stage 3.
-  // It patches the XML with the new titles and "pending" placeholders immediately.
   const handleStructureUpdate = async (newThesis: ThesisStructure) => {
       if (!formatRules) return;
       
       try {
-          // 1. Generate new XML with modified structure and placeholders
           const newXml = generateThesisXML(newThesis, formatRules, references);
-          
-          // 2. Re-parse this new XML to update the application state
-          // This ensures the next steps (Writing) are working on the MODIFIED document structure.
           const newRules = parseWordXML(newXml);
           
-          // 3. Update State
           setFormatRules(newRules);
           setThesis(newThesis);
-          
-          // 4. Move to next step
           setCurrentStep('discussion');
           
       } catch (e) {
@@ -108,7 +160,6 @@ const App: React.FC = () => {
       const a = document.createElement('a');
       a.href = url;
       a.download = `${thesis.title || 'thesis'}_draft.xml`;
-      // Append to body is required for Firefox
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -122,13 +173,19 @@ const App: React.FC = () => {
   // --- Project Persistence ---
   const handleSaveProject = () => {
     const state: ProjectState = {
-      version: "1.0",
+      version: "1.1",
       timestamp: Date.now(),
       step: currentStep,
       thesis,
       formatRules,
       references,
-      apiSettings // Save API settings with project
+      apiSettings: {
+          apiKey: apiSettings.apiKey,
+          baseUrl: apiSettings.baseUrl,
+          modelName: apiSettings.modelName
+      },
+      agentLogs,
+      usageStats
     };
     const json = JSON.stringify(state, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
@@ -154,14 +211,15 @@ const App: React.FC = () => {
         if (state.formatRules) setFormatRules(state.formatRules);
         if (state.references) setReferences(state.references);
         if (state.step) setCurrentStep(state.step);
+        if (state.agentLogs) setAgentLogs(state.agentLogs);
+        if (state.usageStats) setUsageStats(state.usageStats);
         
         // Restore API Settings if they exist in the file
         if (state.apiSettings) {
-           setApiSettings(state.apiSettings);
-           localStorage.setItem('thesis_api_settings', JSON.stringify(state.apiSettings));
+           setApiSettings(prev => ({...prev, ...state.apiSettings}));
         }
         
-        alert("项目加载成功！");
+        alert("项目加载成功！完整状态已恢复。");
       } catch (err) {
         console.error(err);
         alert("项目文件解析失败，请确保文件格式正确。");
@@ -185,6 +243,7 @@ const App: React.FC = () => {
         onClose={() => setIsSettingsOpen(false)}
         settings={apiSettings}
         onSave={handleSaveSettings}
+        usageStats={usageStats}
       />
       
       <main className="flex-1 flex flex-col overflow-hidden relative">
@@ -234,7 +293,7 @@ const App: React.FC = () => {
               thesis={thesis} 
               onStructureConfirmed={handleStructureUpdate}
               setThesis={setThesis}
-              apiSettings={apiSettings}
+              apiSettings={settingsWithCallback}
               formatRules={formatRules}
             />
           )}
@@ -244,7 +303,7 @@ const App: React.FC = () => {
               thesis={thesis}
               setThesis={setThesis}
               onNext={() => setCurrentStep('writing')}
-              apiSettings={apiSettings}
+              apiSettings={settingsWithCallback}
             />
           )}
 
@@ -255,7 +314,9 @@ const App: React.FC = () => {
               formatRules={formatRules!}
               references={references}
               setReferences={setReferences}
-              apiSettings={apiSettings}
+              apiSettings={settingsWithCallback}
+              agentLogs={agentLogs}
+              addLog={addAgentLog}
             />
           )}
 

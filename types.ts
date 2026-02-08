@@ -23,11 +23,7 @@ export interface FormatRules {
   fontSizeNormal: string;
 }
 
-export interface TemplateBlock {
-  order: number;
-  // Fix: Added 'other' to support all node types from parser mapping
-  nodeType: 'p' | 'tbl' | 'sectPr' | 'other';
-  type:
+export type BlockKind = 
     | 'front_title' | 'toc' | 'toc_item' | 'toc_title' | 'back_title'
     | 'heading' | 'paragraph'
     | 'caption_figure' | 'caption_table'
@@ -36,58 +32,35 @@ export interface TemplateBlock {
     | 'section' // Legacy support
     | 'other'
     | 'table';
-  level: number; // 0 normal, 1-3 for headings
+
+export interface TemplateBlock {
+  order: number;
+  // Fix: Added 'other' to support all node types from parser mapping
+  nodeType: 'p' | 'tbl' | 'sectPr' | 'other';
+  type: BlockKind;
+  level: number; // 0 normal, 1-3
   styleId?: string;
-  text: string;
-  path?: string; // e.g. "绪论 / 研究背景"
-  owner?: { h1?: string; h2?: string; h3?: string; sectionId?: string }; // Hierarchy ownership
-  fields?: string[]; // instrText content
-  bookmarks?: string[]; // bookmarkStart names
-  tableRows?: string[][]; // Content preview if table
+  text?: string;
+  owner?: { sectionId: string; h1?: string; h2?: string; h3?: string };
+  fields?: string[];
+  bookmarks?: string[];
 }
 
-// --- New Mapping Types ---
-
-export type MappingSectionKind = "front" | "toc" | "lot" | "lof" | "body" | "back" | "root";
+export type MappingSectionKind = 'front' | 'toc' | 'lot' | 'lof' | 'body' | 'back' | 'root';
 
 export interface MappingSection {
   id: string;
   kind: MappingSectionKind;
   title: string;
-  level: 0 | 1 | 2 | 3;
-  parentId?: string;
+  level: number;
+  parentId?: string; // For nested structure if needed
   startOrder: number;
-  endOrder: number;     // inclusive
-  blocks: string[];     // block ids
+  endOrder: number;
+  blocks: string[]; // Block IDs
 }
 
-export type BlockKind =
-  | "heading"
-  | "front_title"
-  | "back_title"
-  | "toc_title"
-  | "toc_item"
-  | "paragraph"
-  | "image_para"
-  | "equation"
-  | "caption_figure"
-  | "caption_table"
-  | "table"
-  | "sectPr"
-  | "other";
-
-export interface MappingBlock {
+export interface MappingBlock extends TemplateBlock {
   id: string;
-  order: number;           // 1-based
-  nodeType: "p" | "tbl" | "sectPr" | "other";
-  kind: BlockKind;
-  level: 0 | 1 | 2 | 3;
-  styleId?: string;
-  text?: string;
-  owner: { sectionId: string; h1?: string; h2?: string; h3?: string };
-  fields?: string[];
-  bookmarks?: string[];
-  rows?: string[][];
 }
 
 export interface TemplateMappingJSON {
@@ -97,22 +70,14 @@ export interface TemplateMappingJSON {
   blocks: MappingBlock[];
 }
 
-// --- Visualization Types ---
 export interface VisualNode {
   id: string;
   label: string;
-  type: 'section_l1' | 'section_l2' | 'section_l3' | 'content_block' | 'placeholder';
-  kind?: string; // e.g. "Abstract", "TOC", "Body"
-  content?: string; // For previewing text content
+  type: string;
+  kind?: string;
   children: VisualNode[];
-  isAI?: boolean; // True if from AI structure
-  status?: 'empty' | 'filled' | 'pending';
-}
-
-export interface ApiSettings {
-  apiKey: string;
-  baseUrl?: string;
-  modelName: string;
+  content?: string;
+  isAI?: boolean;
 }
 
 export interface ThesisStructure {
@@ -122,37 +87,28 @@ export interface ThesisStructure {
 
 export interface Chapter {
   id: string;
-  level: number;
   title: string;
+  level: number;
   content?: string;
-  status: 'pending' | 'discussed' | 'drafting' | 'completed';
-  designConfirmed: boolean;
-  metadata: InterviewData; 
+  subsections: Chapter[];
+  status: 'pending' | 'discussed' | 'completed';
   chatHistory?: ChatMessage[];
-  subsections?: Chapter[];
-}
-
-export interface InterviewData {
-  methodology?: string; 
-  formulas?: string;     
-  dataSources?: string;  
-  experimentalDesign?: string; 
-  resultsAnalysis?: string; 
-  figureCount: number;
-  tableCount: number;
-  isCoreChapter: boolean; 
+  metadata?: {
+      figureCount?: number;
+      tableCount?: number;
+      isCoreChapter?: boolean;
+      methodology?: string;
+      dataSources?: string;
+      experimentalDesign?: string;
+      resultsAnalysis?: string;
+  };
+  designConfirmed?: boolean;
 }
 
 export interface Reference {
   id: number;
-  placeholder: string; // e.g. "[[REF:1]]"
   description: string;
-}
-
-export interface TechnicalTerm {
-  term: string;
-  fullName: string;
-  acronym: string;
+  placeholder?: string; // The [[REF:...]] string found in text
 }
 
 export type Step = 'upload' | 'title' | 'structure' | 'discussion' | 'writing' | 'export';
@@ -163,12 +119,52 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+export interface TechnicalTerm {
+  term: string;
+  fullName: string;
+  acronym: string;
+}
+
+export interface InterviewData {
+    methodology?: string;
+    dataSources?: string;
+    experimentalDesign?: string;
+    resultsAnalysis?: string;
+}
+
 export interface AgentLog {
   id: string;
-  agentName: 'Supervisor' | 'Writer' | 'TermChecker' | 'Reference' | 'Figure' | 'AutoNumber' | 'Fixer';
+  agentName: 'Supervisor' | 'Methodologist' | 'Writer' | 'Reviewer' | 'TermChecker' | 'Reference' | 'Fixer';
   message: string;
   timestamp: number;
-  status: 'processing' | 'success' | 'warning';
+  status: 'processing' | 'success' | 'warning' | 'error';
+}
+
+export interface TokenUsage {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+}
+
+export interface UsageStats {
+    totalCalls: number;
+    totalPromptTokens: number;
+    totalCompletionTokens: number;
+    // Breakdown by phase
+    byPhase: {
+        structure: TokenUsage;
+        discussion: TokenUsage;
+        writing: TokenUsage;
+        review: TokenUsage;
+    };
+}
+
+export interface ApiSettings {
+    apiKey: string;
+    baseUrl?: string;
+    modelName: string;
+    // Callback for tracking usage, not saved to JSON
+    onUsage?: (usage: TokenUsage) => void;
 }
 
 export interface ProjectState {
@@ -178,5 +174,29 @@ export interface ProjectState {
   thesis: ThesisStructure;
   formatRules: FormatRules | null;
   references: Reference[];
-  apiSettings?: ApiSettings;
+  apiSettings?: Omit<ApiSettings, 'onUsage'>;
+  agentLogs: AgentLog[];
+  usageStats: UsageStats;
+}
+
+// --- Style Configuration Types ---
+
+export type FontFamily = 'SimSun' | 'SimHei' | 'FangSong' | 'KaiTi';
+export type FontSizeName = '小初' | '一号' | '小一' | '二号' | '小二' | '三号' | '小三' | '四号' | '小四' | '五号' | '小五';
+
+export interface StyleConfig {
+  fontFamilyCI: FontFamily; // Chinese Font
+  fontFamilyAscii: string; // English Font (Fixed to Times New Roman mostly)
+  fontSize: string; // Internal Word value (half-points), e.g., "24" for 12pt
+  fontSizeName: FontSizeName; // Display name
+}
+
+export interface StyleSettings {
+  heading1: StyleConfig;
+  heading2: StyleConfig;
+  heading3: StyleConfig;
+  body: StyleConfig;
+  caption: StyleConfig;
+  table: StyleConfig; 
+  reference: StyleConfig;
 }

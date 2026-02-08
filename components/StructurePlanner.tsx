@@ -12,6 +12,70 @@ interface StructurePlannerProps {
   formatRules?: FormatRules | null;
 }
 
+const ChapterNode: React.FC<{ chapter: Chapter, indexPrefix: string, onDelete: (id: string) => void, onRegenerate: (title: string) => void }> = ({ chapter, indexPrefix, onDelete, onRegenerate }) => {
+  return (
+    <div className="mb-2 group relative">
+      <div className={`
+        flex items-center p-3 rounded-lg border pr-10 transition-colors
+        ${chapter.level === 1 ? 'bg-white border-slate-200 shadow-sm' : 
+          chapter.level === 2 ? 'bg-slate-50 border-slate-100 ml-4' : 
+          'bg-transparent border-transparent ml-8 py-1'}
+      `}>
+        <span className={`
+          font-mono text-slate-400 mr-3 shrink-0
+          ${chapter.level === 1 ? 'font-bold text-slate-600' : 'text-xs'}
+        `}>
+          {chapter.level === 1 && chapter.title.startsWith("第") ? "" : indexPrefix}
+        </span>
+        <span className={`
+          text-slate-800 
+          ${chapter.level === 1 ? 'font-bold text-lg' : 
+            chapter.level === 2 ? 'font-medium' : 
+            'text-sm text-slate-600'}
+        `}>
+          {chapter.title}
+        </span>
+
+        <div className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-all flex items-center">
+            {/* Regenerate Button */}
+            <button 
+                onClick={(e) => { e.stopPropagation(); onRegenerate(chapter.title); }}
+                className="text-slate-300 hover:text-blue-500 p-1 mr-1"
+                title="AI 重写此章节结构"
+            >
+                <span className="text-sm">🔄</span>
+            </button>
+            
+            {/* Delete Button */}
+            <button 
+                onClick={(e) => { e.stopPropagation(); onDelete(chapter.id); }}
+                className="text-slate-300 hover:text-red-500 p-1"
+                title="删除章节"
+            >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+            </button>
+        </div>
+      </div>
+
+      {chapter.subsections && chapter.subsections.length > 0 && (
+        <div className="mt-1">
+          {chapter.subsections.map((sub, idx) => (
+            <ChapterNode 
+              key={sub.id} 
+              chapter={sub} 
+              indexPrefix={`${indexPrefix}.${idx + 1}`} 
+              onDelete={onDelete}
+              onRegenerate={onRegenerate}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onStructureConfirmed, setThesis, apiSettings, formatRules }) => {
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState("");
@@ -104,6 +168,22 @@ const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onStructure
     }
   };
 
+  const handleDeleteChapter = (idToDelete: string) => {
+      const deleteRecursive = (chapters: Chapter[]): Chapter[] => {
+          return chapters.filter(c => c.id !== idToDelete).map(c => ({
+              ...c,
+              subsections: deleteRecursive(c.subsections || [])
+          }));
+      };
+      
+      const newChapters = deleteRecursive(thesis.chapters);
+      setThesis(prev => ({ ...prev, chapters: newChapters }));
+  };
+  
+  const handleRegenerateChapter = (title: string) => {
+      setInputMessage(`请针对章节 "${title}" 重新设计这一部分的结构，替换当前的方案。`);
+  };
+
   const handleConfirm = async () => {
       setIsGeneratingXML(true);
       try {
@@ -112,47 +192,6 @@ const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onStructure
           alert("结构同步到模版失败: " + e);
           setIsGeneratingXML(false);
       }
-  };
-
-  const ChapterNode = ({ chapter, indexPrefix }: { chapter: Chapter, indexPrefix: string }) => {
-    return (
-      <div className="mb-2">
-        <div className={`
-          flex items-center p-3 rounded-lg border 
-          ${chapter.level === 1 ? 'bg-white border-slate-200 shadow-sm' : 
-            chapter.level === 2 ? 'bg-slate-50 border-slate-100 ml-4' : 
-            'bg-transparent border-transparent ml-8 py-1'}
-        `}>
-          <span className={`
-            font-mono text-slate-400 mr-3 shrink-0
-            ${chapter.level === 1 ? 'font-bold text-slate-600' : 'text-xs'}
-          `}>
-            {/* If title already has "第X章", suppress indexPrefix for L1 */}
-            {chapter.level === 1 && chapter.title.startsWith("第") ? "" : indexPrefix}
-          </span>
-          <span className={`
-            text-slate-800 
-            ${chapter.level === 1 ? 'font-bold text-lg' : 
-              chapter.level === 2 ? 'font-medium' : 
-              'text-sm text-slate-600'}
-          `}>
-            {chapter.title}
-          </span>
-        </div>
-
-        {chapter.subsections && chapter.subsections.length > 0 && (
-          <div className="mt-1">
-            {chapter.subsections.map((sub, idx) => (
-              <ChapterNode 
-                key={sub.id} 
-                chapter={sub} 
-                indexPrefix={`${indexPrefix}.${idx + 1}`} 
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    );
   };
 
   return (
@@ -267,6 +306,8 @@ const StructurePlanner: React.FC<StructurePlannerProps> = ({ thesis, onStructure
                       key={chapter.id} 
                       chapter={chapter} 
                       indexPrefix={`${idx + 1}`} 
+                      onDelete={handleDeleteChapter}
+                      onRegenerate={handleRegenerateChapter}
                     />
                   ))}
                 </div>

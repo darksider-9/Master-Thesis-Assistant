@@ -1,20 +1,22 @@
 
 import { GoogleGenAI } from "@google/genai";
-import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings } from "../types";
+import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings, ThesisStructure } from "../types";
 
 // --- OpenAI Compatible Interface ---
 
-// Helper to clean Markdown JSON code blocks
 const cleanJsonText = (text: string) => {
+  if (!text) return "";
   return text.replace(/^```json\s*/, '').replace(/^```\s*/, '').replace(/\s*```$/, '');
 };
 
 const cleanMarkdownArtifacts = (text: string) => {
+  if (!text) return "";
   return text
     .replace(/\*\*(.*?)\*\*/g, '$1') 
     .replace(/\*(.*?)\*/g, '$1')     
     .replace(/^#+\s+/gm, '')         
-    .replace(/`/g, '');              
+    .replace(/`/g, '')
+    .replace(/__+/g, '');              
 };
 
 // Generic Generator Interface
@@ -35,18 +37,11 @@ const generateContentUnified = async (
     if (settings.baseUrl && settings.baseUrl.trim() !== "") {
         try {
             let url = settings.baseUrl.trim();
-            // Normalize URL: Ensure it doesn't end with slash
             if (url.endsWith('/')) url = url.slice(0, -1);
-            // Append standard chat completions endpoint if not present
             if (!url.endsWith('/chat/completions')) {
-                // If user entered ".../v1", append "/chat/completions"
-                // If user entered root, append "/v1/chat/completions" (heuristic)
                 if (url.endsWith('/v1')) {
                     url = `${url}/chat/completions`;
                 } else {
-                    // Try to be smart: usually proxies give the root.
-                    // We will append /chat/completions and hope the user provided the full path to the API root (e.g. .../v1)
-                    // Or we just append /chat/completions assuming the user pasted the full base.
                     url = `${url}/chat/completions`;
                 }
             }
@@ -90,6 +85,16 @@ const generateContentUnified = async (
             }
 
             const data = await response.json();
+            
+            // Usage Tracking for OpenAI
+            if (data.usage && settings.onUsage) {
+                settings.onUsage({
+                    promptTokens: data.usage.prompt_tokens || 0,
+                    completionTokens: data.usage.completion_tokens || 0,
+                    totalTokens: data.usage.total_tokens || 0
+                });
+            }
+
             const content = data.choices?.[0]?.message?.content || "";
             return content;
 
@@ -101,40 +106,9 @@ const generateContentUnified = async (
     // CASE B: Official Google GenAI SDK
     else {
         const ai = new GoogleGenAI({ apiKey: settings.apiKey });
-        
         let contents: any = "";
         
-        // Convert history to Google format if present
         if (req.history && req.history.length > 0) {
-            // Google SDK expects a specific chat structure or simple contents.
-            // For generateContent, we can pass text. For chat, we need history.
-            // Here we flatten to a simple prompt strategy for simplicity in "generateContent", 
-            // OR we assume the caller wants a stateless call (like Supervisor).
-            // For multi-turn with history, strict mapping is needed.
-            
-            // However, the Google SDK `generateContent` takes `contents` which can be multi-part.
-            // But it doesn't automatically handle "history" objects unless we use `ai.chats.create`.
-            // To keep it unified with the OpenAI logic above (which is stateless HTTP), 
-            // we will construct the prompt by appending history to the prompt text 
-            // OR use the Chat session if strictly required. 
-            // Given the complexity, we'll serialize history into the text for the simple `generateContent` call
-            // unless we really need `startChat`. 
-            // Let's use `startChat` logic for history cases?
-            // Actually, simply concatenating history into the "contents" string is often robust enough for simple agents,
-            // but let's try to map it to `Content` objects if possible.
-            
-            // Simplified approach for Google SDK (Stateless):
-            // System instruction is separate.
-            // History is manually managed in the prompt context? 
-            // No, Google SDK supports `systemInstruction`.
-            
-            // Let's stick to the prompt engineering approach for history to keep it simple across both:
-            // "Here is the history:\nUser:...\nAssistant:..."
-            
-            // Wait, the prompt requirements say "Use ai.models.generateContent".
-            // Let's construct a Chat session if history exists? No, the requirement is generateContent.
-            // We will format the history into the prompt string.
-            
             let fullPrompt = "";
             req.history.forEach(h => {
                 fullPrompt += `${h.role === 'user' ? 'User' : 'Model'}: ${h.content}\n`;
@@ -143,8 +117,6 @@ const generateContentUnified = async (
                 fullPrompt += `User: ${req.userPrompt}\n`;
             }
             contents = fullPrompt.trim();
-            
-            // If history is empty but userPrompt exists
             if (!contents && req.userPrompt) contents = req.userPrompt;
         } else {
              contents = req.userPrompt || "";
@@ -159,6 +131,16 @@ const generateContentUnified = async (
                     responseMimeType: req.jsonMode ? "application/json" : "text/plain"
                 }
             });
+
+            // Usage Tracking for Gemini
+            if (res.usageMetadata && settings.onUsage) {
+                settings.onUsage({
+                    promptTokens: res.usageMetadata.promptTokenCount || 0,
+                    completionTokens: res.usageMetadata.candidatesTokenCount || 0,
+                    totalTokens: res.usageMetadata.totalTokenCount || 0
+                });
+            }
+
             return res.text || "";
         } catch (e) {
              console.error("Google GenAI Call Failed", e);
@@ -167,14 +149,8 @@ const generateContentUnified = async (
     }
 };
 
-// --- Supervisor Agent (Structure Design) ---
-export const chatWithSupervisor = async (
-  history: ChatMessage[], 
-  thesisTitle: string,
-  currentStructure: any,
-  settings: ApiSettings
-): Promise<{ reply: string, updatedStructure?: any }> => {
-  const historyText = history.slice(0, -1).map(h => `${h.role}: ${h.content}`).join("\n");
+export const chatWithSupervisor = async (history: ChatMessage[], thesisTitle: string, currentStructure: any, settings: ApiSettings) => {
+   const historyText = history.slice(0, -1).map(h => `${h.role}: ${h.content}`).join("\n");
   const lastMsg = history[history.length - 1];
 
   const fewShotExample = `
@@ -182,71 +158,30 @@ export const chatWithSupervisor = async (
   "reply": "根据您的要求，我调整了第三章的结构...",
   "updatedStructure": {
     "chapters": [
-      {
-        "title": "第1章 绪论", 
-        "level": 1,
-        "subsections": [
-          { "title": "1.1 研究背景", "level": 2, "subsections": [] }
-        ]
-      }
+      { "title": "第1章 绪论", "level": 1, "subsections": [] }
     ]
   }
 }`;
-
   const systemPrompt = `
-    你是一位严谨的硕士生导师。当前任务：协助学生设计论文大纲。
-    论文题目：${thesisTitle}
-    
-    【核心规则】
-    1. **必须**返回标准的 JSON 格式。
-    2. 目标是确定完整大纲（5-7章），必须细化到 **三级标题**。
-    3. 只有在用户明确同意或要求修改结构时，才在 \`updatedStructure\` 中返回完整的大纲树。
-    4. **【标题格式要求】**: 
-       - 一级标题必须加前缀，格式为 "第X章 标题名" (例如: "第1章 绪论")
-       - 二级/三级标题请保留 "1.1", "1.1.1" 这样的序号前缀。
-    
-    【JSON 结构参考】
-    ${fewShotExample}
-    
+    你是一位严谨的硕士生导师。任务：协助学生设计论文大纲。题目：${thesisTitle}
+    规则：1. 返回标准JSON。2. 细化到三级标题。3. 标题格式 "第X章 标题" 或 "1.1 标题"。
+    JSON参考: ${fewShotExample}
     当前结构: ${JSON.stringify(currentStructure)}
   `;
-
   try {
-    const text = await generateContentUnified(settings, {
-        systemPrompt,
-        userPrompt: lastMsg.content, // Pass only the new message as prompt, history is context? 
-        // Logic fix: generateContentUnified for Google combines history. 
-        // For OpenAI, we need explicit history array.
-        history: history.slice(0, -1),
-        jsonMode: true
-    });
+    const text = await generateContentUnified(settings, { systemPrompt, userPrompt: lastMsg.content, history: history.slice(0, -1), jsonMode: true });
     return JSON.parse(cleanJsonText(text) || "{}");
-  } catch (e) {
-    console.error(e);
-    return { reply: `（系统提示：API调用失败 - ${e instanceof Error ? e.message : '未知错误'}）` };
-  }
+  } catch (e) { return { reply: `API Error: ${e}` }; }
 };
 
-// --- Methodology Supervisor Agent ---
-export const chatWithMethodologySupervisor = async (
-  history: ChatMessage[],
-  thesisTitle: string,
-  chapter: Chapter,
-  settings: ApiSettings
-): Promise<{ reply: string, finalizedMetadata?: InterviewData }> => {
-  
-  const getStructureText = (ch: Chapter, prefix = ""): string => {
-    let text = `${prefix}${ch.title}\n`;
-    if (ch.subsections && ch.subsections.length > 0) {
-      ch.subsections.forEach((sub, i) => {
-        text += getStructureText(sub, `${prefix}  `);
-      });
-    }
-    return text;
-  };
-
-  const chapterStructure = getStructureText(chapter);
+export const chatWithMethodologySupervisor = async (history: ChatMessage[], thesisTitle: string, chapter: Chapter, settings: ApiSettings) => {
   const lastMsg = history[history.length - 1];
+  
+  // Flatten structure for context
+  const chapterStructure = JSON.stringify(chapter, (key, value) => {
+      if (key === 'chatHistory') return undefined;
+      return value;
+  }, 2);
 
   const systemPrompt = `
     角色：专业的硕士导师/审稿人。
@@ -292,7 +227,7 @@ export const chatWithMethodologySupervisor = async (
 
 // --- Single Section Writer ---
 
-interface WriteSectionContext {
+export interface WriteSectionContext {
   thesisTitle: string;
   chapterLevel1: Chapter; // Context: The main chapter this section belongs to
   targetSection: Chapter; // The specific section (can be L1, L2, or L3) to write
@@ -341,83 +276,302 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
        - 插入图片：[[FIG:图片描述]]  (例如: [[FIG:U-Net网络结构图]])
        - 插入表格：[[TBL:表格描述]]
        - 插入公式：[[EQ:公式内容]]
-       - 插入引用：[[REF:引用ID]] (例如: [[REF:1]])
+       - 插入引用：**关键**：请明确包含引用文献的关键词或描述，以便后续索引。格式：[[REF:描述或关键词]]。
+         例如: "根据文献 [[REF:U-Net original paper, keywords: CT unet]] 的方法..." 或 "相关研究表明 [[REF:ResNet]] ..."。
        - **绝对禁止**使用 Markdown 图片或表格语法。
     3. **段落**：普通文本段落之间用换行符分隔即可。不要使用 XML/HTML 标签。
-    4. **字数**：300-800 字。
 
     请开始撰写：
   `;
 
   try {
-    const text = await generateContentUnified(settings, {
-        systemPrompt,
-        userPrompt: "请开始撰写本小节内容",
-        jsonMode: false
-    });
+    const text = await generateContentUnified(settings, { systemPrompt, userPrompt: "请开始撰写本小节内容", jsonMode: false });
     return cleanMarkdownArtifacts(text);
   } catch (e) {
-    console.error(e);
     throw new Error(`撰写失败: ${e instanceof Error ? e.message : '未知错误'}`);
   }
 };
 
-// --- Post-Processing Agents ---
+// --- COMPLEX POST-PROCESSING WITH AI AGENTS ---
 
-export const runPostProcessingAgents = async (
-  fullChapterText: string,
-  settings: ApiSettings
-): Promise<{
-    polishedText: string;
-    newReferences: Reference[];
-    newTerms: TechnicalTerm[];
-}> => {
+interface PostProcessContext {
+    fullText: string; // Deprecated in favor of allChapters structure
+    chapterId: string; // The chapter we are processing
+    allChapters: Chapter[];
+    globalReferences: Reference[];
+    globalTerms: TechnicalTerm[];
+    settings: ApiSettings;
+    onLog?: (msg: string) => void;
+}
+
+interface PostProcessResult {
+    updatedText: string;
+    updatedReferences: Reference[];
+    updatedTerms: TechnicalTerm[];
+    updatedChapters: Chapter[]; 
+}
+
+// Helper: Flatten chapters to find order
+const flattenChapters = (chapters: Chapter[]): Chapter[] => {
+    let list: Chapter[] = [];
+    chapters.forEach(c => {
+        list.push(c);
+        if (c.subsections) list = list.concat(flattenChapters(c.subsections));
+    });
+    return list;
+};
+
+// 1. Extraction Agent
+const extractTermsAI = async (text: string, settings: ApiSettings): Promise<TechnicalTerm[]> => {
+    if (!text || text.length < 50) return [];
+    
+    const systemPrompt = `
+      You are a Technical Term Extraction Agent.
+      Analyze the provided text and identify "Professional Technical Terms" that are defined using the format "Full Name (Acronym)" or "Full Name (English)".
+      
+      CRITICAL FILTERING RULES:
+      1. IGNORE figure/table citations like "Figure (1)", "Table (2)", "Eq. (3)".
+      2. IGNORE common parentheses like "shown in (a)", "note (see below)".
+      3. EXTRACT ONLY true domain-specific terms (e.g., "Convolutional Neural Networks (CNN)", "Cone Beam CT (CBCT)").
+      
+      Return JSON: { "terms": [ { "term": "中文全称", "acronym": "ACRONYM_OR_ENGLISH" } ] }
+      Return empty list if none found.
+    `;
+
+    try {
+        const res = await generateContentUnified(settings, {
+            systemPrompt,
+            userPrompt: text.slice(0, 4000), // Limit context
+            jsonMode: true
+        });
+        const parsed = JSON.parse(cleanJsonText(res));
+        return parsed.terms || [];
+    } catch (e) {
+        console.warn("Term extraction failed", e);
+        return [];
+    }
+};
+
+// 2. Rewrite Agent
+const rewriteContentAI = async (text: string, instructions: string, settings: ApiSettings): Promise<string> => {
+    const systemPrompt = `
+      You are a Technical Thesis Editor.
+      Your task is to REWRITE the provided text to strictly adhere to the terminology consistency rules provided.
+      
+      RULES:
+      1. Keep the original meaning, style, and length EXACTLY the same.
+      2. ONLY modify the technical terms as requested in the instructions.
+      3. Ensure the text flows naturally after modification.
+      4. Preserve all special placeholders like [[FIG:...]], [[REF:...]], [[EQ:...]].
+      
+      INSTRUCTIONS:
+      ${instructions}
+    `;
+
+    try {
+        const res = await generateContentUnified(settings, {
+            systemPrompt,
+            userPrompt: `Original Text:\n${text}`,
+            jsonMode: false
+        });
+        return cleanMarkdownArtifacts(res);
+    } catch (e) {
+        return text; // Fallback to original
+    }
+};
+
+export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<PostProcessResult> => {
+   const { chapterId, allChapters, globalReferences, settings, onLog } = ctx;
    
-   const systemPrompt = `
-     You are a Quality Assurance Agent Cluster.
-     Tasks:
-     1. **Syntax Check**: Ensure specific placeholders are correctly formatted: [[FIG:Desc]], [[TBL:Desc]], [[REF:ID]]. 
-     2. **Term Check**: Extract technical terms.
-     3. **Reference Check**: Extract [[REF:ID]] usage and generate a reference list.
-     
-     Return JSON:
-     {
-       "polishedText": "Corrected text...",
-       "references": [
-          { "id": 1, "description": "Author, Title, Year..." }
-       ],
-       "terms": [
-          { "term": "GAN", "fullName": "Generative Adversarial Network", "acronym": "GAN" }
-       ]
-     }
-   `;
-
-   const userPrompt = `Input Text (Raw Content):\n${fullChapterText.slice(0, 15000)}`;
-
-   try {
-     const text = await generateContentUnified(settings, {
-         systemPrompt,
-         userPrompt,
-         jsonMode: true
-     });
-     
-     const result = JSON.parse(cleanJsonText(text) || "{}");
-     return {
-        polishedText: result.polishedText || fullChapterText,
-        newReferences: result.references || [],
-        newTerms: result.terms || []
-     };
-
-   } catch (e) {
-      console.error("Post processing failed", e);
-      return { polishedText: fullChapterText, newReferences: [], newTerms: [] };
+   // 1. Deep Clone & Flatten for Analysis
+   let updatedChapters = JSON.parse(JSON.stringify(allChapters));
+   const flatAll = flattenChapters(updatedChapters);
+   
+   // Identify the subset of nodes belonging to the CURRENT chapter
+   // We need to process these for extraction and potentially rewriting
+   const currentChapterNodes = flatAll.filter((c: Chapter) => c.id.startsWith(chapterId) || c.id === chapterId);
+   
+   // --- PHASE 1: AI TERM EXTRACTION (Current Chapter Only) ---
+   if (onLog) onLog(`正在扫描本章 ${currentChapterNodes.length} 个节点的专业术语...`);
+   
+   // We gather terms found in THIS chapter
+   const localTermsFound: { term: TechnicalTerm, nodeId: string }[] = [];
+   
+   for (const node of currentChapterNodes) {
+       if (!node.content) continue;
+       const terms = await extractTermsAI(node.content, settings);
+       terms.forEach(t => {
+           localTermsFound.push({ 
+               term: { ...t, fullName: t.term }, 
+               nodeId: node.id 
+           });
+       });
    }
+
+   // --- PHASE 2: GLOBAL INDEXING (Determine First Occurrence) ---
+   if (onLog) onLog("构建全书术语索引，计算首次出现位置...");
+
+   // We need to know if these terms appear in EARLIER chapters (Pre-order).
+   // Since we don't extract AI terms from previous chapters every time (too slow),
+   // we do a hybrid approach: 
+   // 1. We assume we have a 'registry' of known terms (ctx.globalTerms is the accumulation).
+   // 2. But to be safe for "out of order writing", we perform a lightweight string check 
+   //    on ALL preceding chapters for the terms we just found.
+   
+   const termDirectives: Record<string, 'use_full' | 'use_short'> = {}; // Key: NodeID + Acronym
+   const uniqueAcronyms = Array.from(new Set(localTermsFound.map(x => x.term.acronym.toUpperCase())));
+
+   // For each acronym found in this chapter, find its ABSOLUTE FIRST occurrence in the WHOLE book
+   uniqueAcronyms.forEach(acronym => {
+       const termObj = localTermsFound.find(x => x.term.acronym.toUpperCase() === acronym)?.term;
+       if (!termObj) return;
+
+       // Find the very first node in the ENTIRE book that mentions this acronym OR its full name
+       // We use a simple includes check for speed on the global scope
+       let firstGlobalNodeId = "";
+       
+       for (const node of flatAll) {
+           if (!node.content) continue;
+           const contentUpper = node.content.toUpperCase();
+           // Strict check: Acronym should be bounded or in parens to avoid partial matches
+           // But for simplicity in this logic, we check if the concept exists
+           if (contentUpper.includes(acronym) || (termObj.fullName && node.content.includes(termObj.fullName))) {
+               firstGlobalNodeId = node.id;
+               break; // Found the first one
+           }
+       }
+
+       // Now decide for the CURRENT chapter nodes
+       currentChapterNodes.forEach((node: Chapter) => {
+           if (!node.content) return;
+           // Does this node contain the term?
+           const hasTerm = node.content.toUpperCase().includes(acronym) || node.content.includes(termObj.fullName);
+           if (hasTerm) {
+               const key = `${node.id}||${acronym}`;
+               if (node.id === firstGlobalNodeId) {
+                   termDirectives[key] = 'use_full';
+               } else {
+                   termDirectives[key] = 'use_short';
+               }
+           }
+       });
+   });
+
+   // --- PHASE 3: AI REWRITING (Apply Rules) ---
+   if (onLog) onLog("AI 正在根据全局规则重写不规范的段落...");
+
+   let rewrittenCount = 0;
+   
+   // We iterate current chapter nodes again to apply fixes
+   for (const node of currentChapterNodes) {
+       if (!node.content) continue;
+       
+       const nodeDirectives: string[] = [];
+       
+       uniqueAcronyms.forEach(acronym => {
+           const rule = termDirectives[`${node.id}||${acronym}`];
+           if (!rule) return;
+           
+           const termInfo = localTermsFound.find(t => t.term.acronym.toUpperCase() === acronym)?.term;
+           if (!termInfo) return;
+
+           if (rule === 'use_full') {
+               nodeDirectives.push(`- Term "${acronym}" is defined for the FIRST time here. Ensure it appears ONCE as "${termInfo.fullName} (${termInfo.acronym})". Do not use just "${acronym}" before defining it.`);
+           } else {
+               nodeDirectives.push(`- Term "${acronym}" has been defined previously. Replace instances of "${termInfo.fullName} (${termInfo.acronym})" or "${termInfo.fullName}" with just "${termInfo.acronym}".`);
+           }
+       });
+
+       if (nodeDirectives.length > 0) {
+           // Call AI to rewrite this specific section
+           if (onLog) onLog(`  - 修正节点: ${node.title} ...`);
+           const newContent = await rewriteContentAI(node.content, nodeDirectives.join("\n"), settings);
+           node.content = newContent; // Update in place
+           rewrittenCount++;
+       }
+   }
+   
+   if (onLog) onLog(`术语一致性检查完成，AI 重写了 ${rewrittenCount} 个段落。`);
+
+
+   // --- PHASE 4: Reference & Formatting (Legacy Logic) ---
+   const finalRefOrder: Reference[] = [];
+   let nextId = 1;
+
+   const processBlock = (content: string): string => {
+       if (!content) return "";
+       let txt = cleanMarkdownArtifacts(content);
+
+       // Space & Newline handling
+       const parts = txt.split(/(\[\[EQ:.*?\]\])/g);
+       txt = parts.map(part => {
+           if (part.startsWith('[[EQ:')) return part; 
+           let s = part.replace(/ {2,}/g, '\n'); 
+           s = s.replace(/[ \t\r\f\v]+/g, ''); 
+           return s;
+       }).join('');
+       
+       // Ref Indexing
+       return txt.replace(/(\[\[REF:(.*?)\]\]|\[(\d+)\])/g, (match, pFull, pDesc, pId) => {
+            let description = "";
+            if (pDesc) description = pDesc.trim();
+            else if (pId) {
+                const oldRef = globalReferences.find(r => r.id === parseInt(pId));
+                if (oldRef) description = oldRef.description;
+                else return match;
+            }
+            if (!description) return match;
+
+            let assignedId = 0;
+            const existingIdx = finalRefOrder.findIndex(r => r.description === description || r.description.includes(description) || description.includes(r.description));
+            
+            if (existingIdx !== -1) {
+                assignedId = finalRefOrder[existingIdx].id;
+            } else {
+                assignedId = nextId++;
+                finalRefOrder.push({ id: assignedId, description, placeholder: match });
+            }
+            return `[${assignedId}]`;
+       });
+   };
+
+   // Critical: We must run this over ALL chapters to re-index correctly
+   // because inserting a reference in Chapter 1 shifts IDs in Chapter 2
+   if (onLog) onLog("正在全书重排参考文献顺序...");
+   
+   const finalUpdateRecursive = (list: Chapter[]): Chapter[] => {
+       return list.map(ch => {
+           let newContent = ch.content;
+           if (newContent) {
+               newContent = processBlock(newContent);
+           }
+           return {
+               ...ch,
+               content: newContent,
+               subsections: ch.subsections ? finalUpdateRecursive(ch.subsections) : []
+           };
+       });
+   };
+
+   updatedChapters = finalUpdateRecursive(updatedChapters);
+
+   // Extract new global terms list for UI display
+   const finalGlobalTerms = [...ctx.globalTerms];
+   localTermsFound.forEach(lt => {
+       if (!finalGlobalTerms.find(gt => gt.acronym === lt.term.acronym)) {
+           finalGlobalTerms.push(lt.term);
+       }
+   });
+
+   return {
+       updatedText: "", 
+       updatedReferences: finalRefOrder,
+       updatedTerms: finalGlobalTerms,
+       updatedChapters: updatedChapters
+   };
 };
 
-export const repairChapterFormatting = async (
-  rawContent: string, 
-  formatRules: FormatRules,
-  settings: ApiSettings
-) => {
-   return rawContent;
-};
+function escapeRegExp(string: string) {
+  if (typeof string !== 'string') return "";
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
