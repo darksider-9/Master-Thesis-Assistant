@@ -33,7 +33,7 @@ const buildVisualTree = (rules: FormatRules, thesis: ThesisStructure): VisualNod
         rootNodes.push(secNode);
         
         // 2. Get all blocks belonging to this section
-        const blocks = rules.mapping!.blocks.filter(b => b.owner.sectionId === sec.id);
+        const blocks = rules.mapping!.blocks.filter(b => b.owner?.sectionId === sec.id);
         
         // 3. Tree Construction State
         // activeL1: Usually the secNode itself for Body/Front/Back
