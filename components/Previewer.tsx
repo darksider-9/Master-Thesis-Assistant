@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { ThesisStructure, FormatRules, Reference, StyleSettings, StyleConfig, FontFamily, FontSizeName } from '../types';
 import StructureVisualizer from './StructureVisualizer';
@@ -32,8 +31,12 @@ const DEFAULT_SETTINGS: StyleSettings = {
     body: { fontFamilyCI: 'SimSun', fontFamilyAscii: 'Times New Roman', fontSize: '24', fontSizeName: '小四' },
     caption: { fontFamilyCI: 'FangSong', fontFamilyAscii: 'Times New Roman', fontSize: '21', fontSizeName: '五号' },
     table: { fontFamilyCI: 'SimSun', fontFamilyAscii: 'Times New Roman', fontSize: '21', fontSizeName: '五号' },
-    reference: { fontFamilyCI: 'SimSun', fontFamilyAscii: 'Times New Roman', fontSize: '21', fontSizeName: '五号' }
+    reference: { fontFamilyCI: 'SimSun', fontFamilyAscii: 'Times New Roman', fontSize: '21', fontSizeName: '五号' },
+    equationSeparator: '-'
 };
+
+// Define a type that only includes keys mapping to StyleConfig (excluding equationSeparator)
+type StyleConfigKey = Exclude<keyof StyleSettings, 'equationSeparator'>;
 
 const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }) => {
   const [viewMode, setViewMode] = useState<'doc' | 'visual'>('doc');
@@ -59,9 +62,10 @@ const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }
     }
   };
 
-  const updateStyle = (key: keyof StyleSettings, field: keyof StyleConfig, value: string) => {
+  const updateStyle = (key: StyleConfigKey, field: keyof StyleConfig, value: string) => {
       setStyles(prev => {
-          const newConfig = { ...prev[key], [field]: value };
+          const oldConfig = prev[key] as StyleConfig;
+          const newConfig = { ...oldConfig, [field]: value };
           if (field === 'fontSizeName') {
               newConfig.fontSize = FONT_SIZE_MAP[value as FontSizeName];
           }
@@ -69,13 +73,13 @@ const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }
       });
   };
 
-  const StyleRow = ({ label, confKey }: { label: string; confKey: keyof StyleSettings }) => (
+  const StyleRow = ({ label, confKey }: { label: string; confKey: StyleConfigKey }) => (
       <div className="grid grid-cols-12 gap-2 items-center text-sm py-1 border-b border-slate-100 last:border-0">
           <div className="col-span-3 font-bold text-slate-600">{label}</div>
           <div className="col-span-4">
               <select 
                 className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs"
-                value={styles[confKey].fontFamilyCI}
+                value={(styles[confKey] as StyleConfig).fontFamilyCI}
                 onChange={e => updateStyle(confKey, 'fontFamilyCI', e.target.value)}
               >
                   <option value="SimSun">宋体</option>
@@ -90,7 +94,7 @@ const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }
           <div className="col-span-3">
               <select 
                  className="w-full bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs"
-                 value={styles[confKey].fontSizeName}
+                 value={(styles[confKey] as StyleConfig).fontSizeName}
                  onChange={e => updateStyle(confKey, 'fontSizeName', e.target.value)}
               >
                   {Object.keys(FONT_SIZE_MAP).map(k => (
@@ -118,6 +122,10 @@ const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }
           }
           if (trimmed.startsWith('[[TBL:')) {
               return <div key={idx} className="text-center text-green-600 text-xs my-2 font-bold">{trimmed.replace('[[TBL:', '表: ').replace(']]', '')}</div>;
+          }
+          if (trimmed.startsWith('[[EQ:')) {
+             const eqText = trimmed.replace('[[EQ:', '').replace(']]', '');
+             return <div key={idx} className="text-center text-slate-700 text-sm font-mono my-2">{eqText} <span className="float-right text-xs opacity-50">(3-1)</span></div>;
           }
 
           return (
@@ -184,6 +192,27 @@ const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }
                     <StyleRow label="表格内容" confKey="table" />
                     <StyleRow label="参考文献" confKey="reference" />
                 </div>
+
+                <div className="mt-4 pt-4 border-t border-slate-100">
+                     <div className="flex items-center justify-between">
+                         <span className="font-bold text-slate-600 text-sm">公式编号格式</span>
+                         <div className="flex bg-slate-100 rounded p-1 text-xs">
+                             <button 
+                               onClick={() => setStyles(prev => ({...prev, equationSeparator: '-'}))}
+                               className={`px-3 py-1 rounded transition-colors ${styles.equationSeparator === '-' ? 'bg-white shadow text-blue-600 font-bold' : 'text-slate-500'}`}
+                             >
+                                (3-1)
+                             </button>
+                             <button 
+                               onClick={() => setStyles(prev => ({...prev, equationSeparator: '.'}))}
+                               className={`px-3 py-1 rounded transition-colors ${styles.equationSeparator === '.' ? 'bg-white shadow text-blue-600 font-bold' : 'text-slate-500'}`}
+                             >
+                                (3.1)
+                             </button>
+                         </div>
+                     </div>
+                </div>
+
                 <div className="mt-4 p-3 bg-blue-50 text-blue-700 text-[10px] rounded leading-relaxed">
                     注：导出时将强制覆盖模板中的原始样式。英文默认锁定 Times New Roman。
                 </div>

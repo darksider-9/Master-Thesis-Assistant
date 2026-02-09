@@ -259,11 +259,9 @@ const findPrototypes = (body: Element, headingStyles: Record<number, string>): P
 };
 
 // --- STYLE OVERRIDES ---
-// Injects user-configured Font and Size into the node's runs
 const applyStyleOverrides = (doc: Document, node: Element, config?: StyleConfig) => {
     if (!config) return;
 
-    // Apply to ALL runs inside this node (or potential children)
     const runs = node.getElementsByTagNameNS(NS.w, "r");
     for (let i = 0; i < runs.length; i++) {
         const r = runs[i];
@@ -273,23 +271,16 @@ const applyStyleOverrides = (doc: Document, node: Element, config?: StyleConfig)
             r.insertBefore(rPr, r.firstChild);
         }
 
-        // 1. Fonts (rFonts)
-        // Check existing
         let rFonts = getChildByTagNameNS(rPr, NS.w, "rFonts");
         if (!rFonts) {
             rFonts = doc.createElementNS(NS.w, "w:rFonts");
             rPr.appendChild(rFonts);
         }
-        // Force set attributes
         rFonts.setAttributeNS(NS.w, "w:ascii", config.fontFamilyAscii);
         rFonts.setAttributeNS(NS.w, "w:hAnsi", config.fontFamilyAscii);
-        // Important: w:eastAsia controls Chinese font
         rFonts.setAttributeNS(NS.w, "w:eastAsia", config.fontFamilyCI);
-        // Hint implies we are using EastAsian typography primarily
         rFonts.setAttributeNS(NS.w, "w:hint", "eastAsia");
 
-        // 2. Font Size (sz and szCs)
-        // Remove existing to avoid conflicts
         const oldSz = getChildByTagNameNS(rPr, NS.w, "sz");
         if (oldSz) rPr.removeChild(oldSz);
         const oldSzCs = getChildByTagNameNS(rPr, NS.w, "szCs");
@@ -376,12 +367,95 @@ const createBookmark = (doc: Document, name: string, id: string, type: "start" |
     return el;
 };
 
+// --- Helpers for Headers & Math ---
+
+const createMathNode = (doc: Document, text: string) => {
+    const oMath = doc.createElementNS(NS.m, "m:oMath");
+    const r = doc.createElementNS(NS.m, "m:r");
+    // Standard Cambria Math font usage implies standard run properties are optional here, 
+    // but we can add them if needed. Word defaults are usually fine for inline math.
+    const t = doc.createElementNS(NS.m, "m:t");
+    t.textContent = text;
+    r.appendChild(t);
+    oMath.appendChild(r);
+    return oMath;
+};
+
+const fixStaticHeaders = (doc: Document) => {
+    const parts = doc.getElementsByTagNameNS(NS.pkg, "part");
+    for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        const name = part.getAttributeNS(NS.pkg, "name");
+        // Look for header parts
+        if (name && name.includes("/word/header")) {
+            const xmlData = getChildByTagNameNS(part, NS.pkg, "xmlData");
+            if (!xmlData) continue;
+            
+            // Search for specific static text nodes from the template
+            const texts = xmlData.getElementsByTagNameNS(NS.w, "t");
+            for (let j = 0; j < texts.length; j++) {
+                const tNode = texts[j];
+                const content = tNode.textContent || "";
+                if (content.includes("插图目录") || content.includes("表格目录")) {
+                    // Found a static header! We must replace this Run with a STYLEREF field.
+                    const run = tNode.parentNode as Element;
+                    const paragraph = run.parentNode as Element;
+                    
+                    if (run.localName === "r" && paragraph.localName === "p") {
+                        // We use a simplified version of createFieldRuns here because we don't have a 'sampleRun' with styles from the header.
+                        // We'll clone the existing run to keep the header styles (font size, etc).
+                        const makeFieldRun = (type: 'begin' | 'end' | 'separate' | 'instr' | 'text', val?: string) => {
+                            const newR = run.cloneNode(true) as Element;
+                            while (newR.firstChild) newR.removeChild(newR.firstChild);
+                            const rPr = getChildByTagNameNS(run, NS.w, "rPr");
+                            if (rPr) newR.appendChild(rPr.cloneNode(true));
+                            
+                            if (type === 'text') {
+                                const t = doc.createElementNS(NS.w, "w:t");
+                                t.setAttribute("xml:space", "preserve");
+                                t.textContent = val || "";
+                                newR.appendChild(t);
+                            } else if (type === 'instr') {
+                                const it = doc.createElementNS(NS.w, "w:instrText");
+                                it.setAttribute("xml:space", "preserve");
+                                it.textContent = val || "";
+                                newR.appendChild(it);
+                            } else {
+                                const f = doc.createElementNS(NS.w, "w:fldChar");
+                                f.setAttributeNS(NS.w, "w:fldCharType", type);
+                                newR.appendChild(f);
+                            }
+                            return newR;
+                        };
+
+                        const fieldRuns = [
+                            makeFieldRun('begin'),
+                            makeFieldRun('instr', ' STYLEREF "标题 1" \\* MERGEFORMAT '),
+                            makeFieldRun('separate'),
+                            makeFieldRun('text', '章节标题'), // Placeholder
+                            makeFieldRun('end')
+                        ];
+
+                        // Insert new runs before the old run, then remove the old run
+                        fieldRuns.forEach(fr => paragraph.insertBefore(fr, run));
+                        paragraph.removeChild(run);
+                        
+                        // Break after fixing this occurrence to avoid messing up if multiple text nodes existed for same string
+                        break; 
+                    }
+                }
+            }
+        }
+    }
+};
+
 // --- Refactored Content Node Creator ---
 const createContentNodes = (
     contentRaw: string, 
     doc: Document, 
     protos: Prototypes,
-    h1StyleId: string,
+    chapterIndex: number,
+    counters: { fig: number; tbl: number; eq: number },
     styleSettings?: StyleSettings
 ): Element[] => {
     const nodes: Element[] = [];
@@ -404,6 +478,7 @@ const createContentNodes = (
 
         // CASE A: Figure
         if (part.startsWith("[[FIG:")) {
+             counters.fig++;
              const desc = part.replace(/^\[\[FIG:/, "").replace(/\]\]$/, "");
              const bmId = (globalId++).toString();
              const bmName = `_Fig_${bmId}`;
@@ -416,7 +491,6 @@ const createContentNodes = (
              if(!jc) { jc = doc.createElementNS(NS.w, "w:jc"); pPr.appendChild(jc); }
              jc.setAttributeNS(NS.w, "w:val", "center");
              
-             // Apply Body Style to Placeholder
              if (styleSettings) applyStyleOverrides(doc, pImg, styleSettings.body);
              nodes.push(pImg);
 
@@ -454,21 +528,20 @@ const createContentNodes = (
 
              pCap.appendChild(createBookmark(doc, bmName, bmId, "start"));
              appendText("图 ");
-             createFieldRuns(doc, capSample, `STYLEREF "${h1StyleId}" \\s`, "X").forEach(n => pCap.appendChild(n));
+             appendText(chapterIndex.toString());
              appendText("-");
-             createFieldRuns(doc, capSample, "SEQ Figure \\* ARABIC \\s 1", "1").forEach(n => pCap.appendChild(n));
+             createFieldRuns(doc, capSample, "SEQ Figure \\* ARABIC \\s 1", counters.fig.toString()).forEach(n => pCap.appendChild(n));
              pCap.appendChild(createBookmark(doc, bmName, bmId, "end"));
              appendText("  " + desc);
              
-             // Apply Caption Style
              if (styleSettings) applyStyleOverrides(doc, pCap, styleSettings.caption);
              nodes.push(pCap);
         }
         // CASE B: Table
         else if (part.startsWith("[[TBL:")) {
+             counters.tbl++;
              const desc = part.replace(/^\[\[TBL:/, "").replace(/\]\]$/, "");
              
-             // Table Caption (Top)
              let pCap = protos.caption ? protos.caption.cloneNode(true) as Element : baseProto.cloneNode(true) as Element;
              const capPr = getChildByTagNameNS(pCap, NS.w, "pPr");
              while (pCap.firstChild) if(pCap.firstChild !== capPr) pCap.removeChild(pCap.firstChild); else pCap.removeChild(pCap.firstChild);
@@ -505,16 +578,15 @@ const createContentNodes = (
 
              pCap.appendChild(createBookmark(doc, bmName, bmId, "start"));
              appendText("表 ");
-             createFieldRuns(doc, capSample, `STYLEREF "${h1StyleId}" \\s`, "X").forEach(n => pCap.appendChild(n));
+             appendText(chapterIndex.toString());
              appendText("-");
-             createFieldRuns(doc, capSample, "SEQ Table \\* ARABIC \\s 1", "1").forEach(n => pCap.appendChild(n));
+             createFieldRuns(doc, capSample, "SEQ Table \\* ARABIC \\s 1", counters.tbl.toString()).forEach(n => pCap.appendChild(n));
              pCap.appendChild(createBookmark(doc, bmName, bmId, "end"));
              appendText("  " + desc);
              
              if (styleSettings) applyStyleOverrides(doc, pCap, styleSettings.caption);
              nodes.push(pCap);
 
-             // Table Body
              if (protos.table) {
                  nodes.push(protos.table.cloneNode(true) as Element);
              } else {
@@ -543,38 +615,62 @@ const createContentNodes = (
                         const id = sp.match(/\d+/)?.[0];
                         const bmName = `_Ref_${id}_target`;
                         
-                        const r = sampleRun!.cloneNode(true) as Element;
-                        const rPr = getChildByTagNameNS(r, NS.w, "rPr");
-                        while(r.firstChild) r.removeChild(r.firstChild);
-                        if(rPr) r.appendChild(rPr);
+                        const refRun = sampleRun!.cloneNode(true) as Element;
+                        while (refRun.firstChild) refRun.removeChild(refRun.firstChild);
+
+                        let rPr = getChildByTagNameNS(sampleRun!, NS.w, "rPr");
+                        if (rPr) {
+                            rPr = rPr.cloneNode(true) as Element;
+                        } else {
+                            rPr = doc.createElementNS(NS.w, "w:rPr");
+                        }
+                        refRun.appendChild(rPr);
                         
-                        const t1 = doc.createElementNS(NS.w, "w:t");
-                        t1.setAttribute("xml:space", "preserve");
-                        t1.textContent = "[";
-                        r.appendChild(t1);
-                        p.appendChild(r);
-
-                        createFieldRuns(doc, sampleRun!, `REF ${bmName} \\r \\h`, id || "0").forEach(n => p.appendChild(n));
-
-                        const r2 = r.cloneNode(true) as Element;
-                        const t2 = doc.createElementNS(NS.w, "w:t");
-                        t2.setAttribute("xml:space", "preserve");
-                        t2.textContent = "]";
-                        r2.appendChild(t2);
-                        p.appendChild(r2);
+                        const vertAlign = doc.createElementNS(NS.w, "w:vertAlign");
+                        vertAlign.setAttributeNS(NS.w, "w:val", "superscript");
+                        rPr.appendChild(vertAlign);
+                        
+                        createFieldRuns(doc, refRun, `REF ${bmName} \\h`, `[${id}]`).forEach(n => p.appendChild(n));
                     } 
                     else if (sp.startsWith("[[EQ:")) {
+                         counters.eq++;
                          const eqText = sp.replace(/^\[\[EQ:/, "").replace(/\]\]$/, "");
-                         const r = sampleRun!.cloneNode(true) as Element;
-                         const rPr = getChildByTagNameNS(r, NS.w, "rPr");
-                         while(r.firstChild) r.removeChild(r.firstChild);
-                         if(rPr) r.appendChild(rPr);
                          
-                         const t = doc.createElementNS(NS.w, "w:t");
-                         t.setAttribute("xml:space", "preserve");
-                         t.textContent = eqText; 
-                         r.appendChild(t);
-                         p.appendChild(r);
+                         // 1. MathML Object (Inline)
+                         // We insert the math object directly into the paragraph
+                         const mathNode = createMathNode(doc, eqText);
+                         p.appendChild(mathNode);
+
+                         // 2. Spacing
+                         const rSpace = sampleRun!.cloneNode(true) as Element;
+                         while(rSpace.firstChild) rSpace.removeChild(rSpace.firstChild);
+                         const rPrSpace = getChildByTagNameNS(sampleRun!, NS.w, "rPr");
+                         if(rPrSpace) rSpace.appendChild(rPrSpace.cloneNode(true));
+                         const tSpace = doc.createElementNS(NS.w, "w:t");
+                         tSpace.setAttribute("xml:space", "preserve");
+                         tSpace.textContent = "\u00A0\u00A0\u00A0\u00A0"; 
+                         rSpace.appendChild(tSpace);
+                         p.appendChild(rSpace);
+
+                         // 3. Numbering
+                         const separator = styleSettings?.equationSeparator || '-';
+                         const appendText = (txt: string) => {
+                             const rNum = sampleRun!.cloneNode(true) as Element;
+                             const rPrNum = getChildByTagNameNS(rNum, NS.w, "rPr");
+                             while(rNum.firstChild) rNum.removeChild(rNum.firstChild);
+                             if(rPrNum) rNum.appendChild(rPrNum);
+                             const tNum = doc.createElementNS(NS.w, "w:t");
+                             tNum.setAttribute("xml:space", "preserve");
+                             tNum.textContent = txt;
+                             rNum.appendChild(tNum);
+                             p.appendChild(rNum);
+                         };
+
+                         appendText("(");
+                         appendText(chapterIndex.toString());
+                         appendText(separator);
+                         createFieldRuns(doc, sampleRun!, "SEQ Equation \\* ARABIC \\s 1", counters.eq.toString()).forEach(n => p.appendChild(n));
+                         appendText(")");
                     }
                     else {
                          const r = sampleRun!.cloneNode(true) as Element;
@@ -598,225 +694,136 @@ const createContentNodes = (
     return nodes;
 };
 
-// -------------------- MAPPING EXTRACTION --------------------
-
 const extractMapping = (
-  body: Element,
-  headingStyleIds: Record<number, string>,
-  sourceName: string
+    body: Element, 
+    headingStyles: Record<number, string>, 
+    sourceName: string
 ): TemplateMappingJSON => {
-  const styleLevelMap: Record<string, 1 | 2 | 3> = {};
-  styleLevelMap[headingStyleIds[1]] = 1;
-  styleLevelMap[headingStyleIds[2]] = 2;
-  styleLevelMap[headingStyleIds[3]] = 3;
+    const sections: MappingSection[] = [];
+    const blocks: MappingBlock[] = [];
+    
+    // Initial Section (Root/Front)
+    let currentSection: MappingSection = {
+        id: `sec_${globalId++}`,
+        kind: 'front',
+        title: 'Front Matter',
+        level: 0,
+        startOrder: 0,
+        endOrder: 0,
+        blocks: []
+    };
+    sections.push(currentSection);
 
-  const sections: MappingSection[] = [];
-  const blocks: MappingBlock[] = [];
-
-  const makeSection = (
-    kind: MappingSectionKind,
-    title: string,
-    level: number,
-    parentId: string | undefined,
-    startOrder: number
-  ): MappingSection => {
-    const id = `${kind}_${sections.length + 1}`;
-    // If there was a previous section, update its endOrder
-    if (sections.length > 0) {
-      const prev = sections[sections.length - 1];
-      // Only close if it hasn't been closed properly (simple heuristic)
-      if (prev.endOrder === -1 || prev.endOrder < prev.startOrder) {
-        prev.endOrder = startOrder - 1;
-      }
-    }
-    const sec: MappingSection = { id, kind, title, level, parentId, startOrder, endOrder: -1, blocks: [] };
-    sections.push(sec);
-    return sec;
-  };
-
-  const root = makeSection("root", "ROOT", 0, undefined, 1);
-  let currentSection = root;
-  
-  const headingStack: { level: 1 | 2 | 3; title: string }[] = [];
-  const tocStack: TocField[] = [];
-  let tocDepthId = 0;
-  let mode: "front" | "body" | "back" = "front";
-
-  const enterSection = (kind: MappingSectionKind, title: string, level: number, order: number) => {
-    currentSection = makeSection(kind, title, level, root.id, order);
-  };
-
-  const currentTocKind = (): MappingSectionKind | null => {
-    if (tocStack.length === 0) return null;
-    return tocStack[tocStack.length - 1].type;
-  };
-
-  const getOwner = () => ({
-    sectionId: currentSection.id,
-    h1: headingStack.find(x => x.level === 1)?.title,
-    h2: headingStack.find(x => x.level === 2)?.title,
-    h3: headingStack.find(x => x.level === 3)?.title
-  });
-
-  const pushBlock = (b: Omit<MappingBlock, "id">) => {
-    const id = `bk_${blocks.length + 1}`;
-    const block: MappingBlock = { id, ...b };
-    blocks.push(block);
-    currentSection.blocks.push(id);
-    currentSection.endOrder = block.order;
-  };
-
-  const children = Array.from(body.children);
-
-  for (let i = 0; i < children.length; i++) {
-    const node = children[i] as Element;
-    const order = i + 1;
-    const local = node.localName;
-
-    // Detect node type
-    let nodeType: 'p' | 'tbl' | 'sectPr' | 'other' = 'other';
-    if (local === 'p' || node.nodeName.endsWith(":p")) nodeType = 'p';
-    else if (local === 'tbl') nodeType = 'tbl';
-    else if (local === 'sectPr') nodeType = 'sectPr';
-
-    if (nodeType === 'p') {
-      const txtRaw = getParaTextRaw(node);
-      const txtNorm = normalizeTitle(txtRaw);
-      const sid = extractStyleId(node) || undefined;
-      const headingLevel = sid ? styleLevelMap[sid] : undefined;
-      const bookmarks = getBookmarkNames(node);
-      const tocOp = detectTocFieldOp(node);
-      
-      if (tocOp.pushed) {
-        tocDepthId += 1;
-        tocStack.push({ type: tocOp.pushed, depthId: tocDepthId });
-      }
-      if (tocOp.sawEnd) {
-        if (tocStack.length > 0) tocStack.pop();
-      }
-
-      if (isBackMatterTitle(txtRaw)) {
-        mode = "back";
-        headingStack.length = 0;
-        tocStack.length = 0;
-        enterSection("back", txtNorm, 1, order);
-        pushBlock({
-          order, nodeType: "p", type: "back_title", level: 1, styleId: sid, text: txtRaw,
-          owner: { sectionId: currentSection.id }, fields: tocOp.instrHits, bookmarks
-        });
-        continue;
-      }
-
-      const tocKind = currentTocKind();
-      if (tocKind) {
-        if (isListOfTablesTitle(txtRaw)) {
-             enterSection("lot", LOT_KEY, 1, order);
-             pushBlock({
-                order, nodeType: "p", type: "toc_title", level: 1, styleId: sid, text: txtRaw,
-                owner: { sectionId: currentSection.id }, fields: tocOp.instrHits, bookmarks
-             });
-             continue;
+    const children = Array.from(body.children);
+    
+    children.forEach((node, idx) => {
+        // We track p, tbl, sectPr
+        if (node.localName !== 'p' && node.localName !== 'tbl' && node.localName !== 'sectPr') return;
+        
+        const order = idx;
+        const blockId = `blk_${globalId++}`;
+        
+        let type: BlockKind = 'other';
+        let level = 0;
+        let text = "";
+        let styleId: string | null = null;
+        
+        // 1. Analyze Node
+        if (node.localName === 'p') {
+            text = getParaTextRaw(node);
+            styleId = extractStyleId(node);
+            
+            if (styleId === headingStyles[1]) { type = 'heading'; level = 1; }
+            else if (styleId === headingStyles[2]) { type = 'heading'; level = 2; }
+            else if (styleId === headingStyles[3]) { type = 'heading'; level = 3; }
+            else {
+                if (isFrontMatterTitle(text)) { type = 'front_title'; level = 1; }
+                else if (isBackMatterTitle(text)) { type = 'back_title'; level = 1; }
+                else if (isListOfTablesTitle(text)) type = 'toc_title'; // LOT
+                else if (isListOfFiguresTitle(text)) type = 'toc_title'; // LOF
+                else if (hasImageLike(node)) type = 'image_placeholder';
+                else if (hasOMML(node)) type = 'equation';
+                else type = 'paragraph';
+                
+                // Heuristic for caption
+                if (styleId && (styleId.toLowerCase().includes('caption') || styleId === 'caption')) {
+                     if (text.includes('图')) type = 'caption_figure';
+                     else if (text.includes('表')) type = 'caption_table';
+                     else type = 'caption_figure';
+                }
+            }
+        } else if (node.localName === 'tbl') {
+            type = 'table';
         }
-        if (isListOfFiguresTitle(txtRaw)) {
-             enterSection("lof", LOF_KEY, 1, order);
-             pushBlock({
-                order, nodeType: "p", type: "toc_title", level: 1, styleId: sid, text: txtRaw,
-                owner: { sectionId: currentSection.id }, fields: tocOp.instrHits, bookmarks
-             });
-             continue;
+        
+        // 2. Section Segmentation Logic
+        let startNewSection = false;
+        let nextKind: MappingSectionKind = currentSection.kind;
+        
+        // If we hit a Level 1 Heading, or specific front/back titles
+        if (level === 1) {
+            startNewSection = true;
+            if (isFrontMatterTitle(text)) {
+                nextKind = 'front';
+                if (text.includes('目录')) nextKind = 'toc';
+            } else if (isBackMatterTitle(text)) {
+                nextKind = 'back';
+            } else {
+                nextKind = 'body';
+            }
         }
-        // Fallback for "目录" appearing inside TOC area
-        if (isFrontMatterTitle(txtRaw) && txtRaw.includes("目录") && currentSection.kind !== 'toc') {
-             enterSection("toc", "目录", 1, order);
-             pushBlock({
-                order, nodeType: "p", type: "toc_title", level: 1, styleId: sid, text: txtRaw,
-                owner: { sectionId: currentSection.id }, fields: tocOp.instrHits, bookmarks
-             });
-             continue;
+        
+        if (startNewSection) {
+             // Close previous
+             currentSection.endOrder = order - 1;
+             
+             // Open new
+             currentSection = {
+                 id: `sec_${globalId++}`,
+                 kind: nextKind,
+                 title: text || `Section ${sections.length}`,
+                 level: 1,
+                 startOrder: order,
+                 endOrder: order,
+                 blocks: []
+             };
+             sections.push(currentSection);
         }
+        
+        // 3. Create Block
+        const blk: MappingBlock = {
+            id: blockId,
+            order,
+            nodeType: node.localName as any,
+            type,
+            level,
+            styleId: styleId || undefined,
+            text,
+            owner: { sectionId: currentSection.id },
+            fields: node.localName === 'p' ? getInstrTexts(node) : undefined,
+            bookmarks: getBookmarkNames(node)
+        };
+        
+        blocks.push(blk);
+        currentSection.blocks.push(blockId);
+        currentSection.endOrder = order;
+    });
 
-        pushBlock({
-          order, nodeType: "p", type: "toc_item", level: 0, styleId: sid, text: txtRaw,
-          owner: { sectionId: currentSection.id }, fields: tocOp.instrHits, bookmarks
-        });
-        continue;
-      }
-
-      if (isFrontMatterTitle(txtRaw)) {
-        mode = "front";
-        headingStack.length = 0;
-        const isTocTitle = normalizeForMatch(txtRaw).toLowerCase().includes("目录");
-        enterSection(isTocTitle ? "toc" : "front", txtNorm, 1, order);
-        pushBlock({
-            order, nodeType: "p", type: isTocTitle ? "toc_title" : "front_title", level: 1, styleId: sid, text: txtRaw,
-            owner: { sectionId: currentSection.id }, fields: tocOp.instrHits, bookmarks
-        });
-        continue;
-      }
-
-      if (mode !== "body" && headingLevel === 1) {
-        mode = "body";
-        headingStack.length = 0;
-      }
-
-      if (mode === "body" && headingLevel) {
-         while(headingStack.length > 0 && headingStack[headingStack.length - 1].level >= headingLevel) {
-             headingStack.pop();
-         }
-         headingStack.push({ level: headingLevel, title: txtNorm });
-         if (headingLevel === 1) {
-             enterSection("body", txtNorm, 1, order);
-         }
-         pushBlock({
-            order, nodeType: "p", type: "heading", level: headingLevel, styleId: sid, text: txtRaw,
-            owner: getOwner(), fields: tocOp.instrHits, bookmarks
-         });
-         continue;
-      }
-
-      let kind: BlockKind = "paragraph";
-      if (hasOMML(node)) kind = "equation";
-      else if (hasImageLike(node)) kind = "image_placeholder";
-      else if (hasFieldSEQ(node) && /^(图|表)/.test(normalizeTitle(txtRaw))) {
-        kind = normalizeTitle(txtRaw).startsWith("图") ? "caption_figure" : "caption_table";
-      }
-
-      pushBlock({
-         order, nodeType: "p", type: kind, level: 0, styleId: sid, text: txtRaw,
-         owner: mode === "body" ? getOwner() : { sectionId: currentSection.id },
-         fields: tocOp.instrHits, bookmarks
-      });
-
-    } else if (nodeType === 'tbl') {
-      pushBlock({
-        order, nodeType: "tbl", type: "table", level: 0,
-        owner: mode === "body" ? getOwner() : { sectionId: currentSection.id }, text: "[表格]"
-      });
-    } else if (nodeType === 'sectPr') {
-      pushBlock({
-        order, nodeType: "sectPr", type: "section", level: 0,
-        owner: mode === "body" ? getOwner() : { sectionId: currentSection.id }, text: ""
-      });
-    } else {
-      pushBlock({
-        order, nodeType: "other", type: "other", level: 0,
-        owner: mode === "body" ? getOwner() : { sectionId: currentSection.id }, text: ""
-      });
-    }
-  }
-
-  return {
-    source: sourceName,
-    headingStyleIds: { h1: headingStyleIds[1], h2: headingStyleIds[2], h3: headingStyleIds[3] },
-    sections,
-    blocks
-  };
+    return {
+        source: sourceName,
+        headingStyleIds: { h1: headingStyles[1], h2: headingStyles[2], h3: headingStyles[3] },
+        sections,
+        blocks
+    };
 };
 
 export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, references: Reference[], styleSettings?: StyleSettings): string => {
     const parser = new DOMParser();
     const doc = parser.parseFromString(rules.rawXML, "text/xml");
     
+    // FIX 1: Fix Static Headers before doing anything else
+    fixStaticHeaders(doc);
+
     const docPart = getPkgPart(doc, "/word/document.xml");
     const docRoot = getPartXmlRoot(docPart!);
     const body = getChildByTagNameNS(docRoot!, NS.w, "body");
@@ -830,7 +837,6 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
 
     const protos = findPrototypes(body, headingStyles);
 
-    // ... (Deletion logic)
     const children = Array.from(body.children);
     let startDeleteIdx = -1;
     let endDeleteIdx = -1;
@@ -869,13 +875,21 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
         anchorNode = sectPr;
     }
 
+    let l1ChapterIndex = 0;
+    let chapterCounters = { fig: 0, tbl: 0, eq: 0 };
+
     const insertChapter = (ch: typeof thesis.chapters[0]) => {
         let pTitle: Element | null = null;
         const titleText = stripHeadingNumbering(ch.title);
 
-        if (ch.level === 1 && protos.h1) {
-             pTitle = cloneWithText(doc, protos.h1, titleText);
-             if(styleSettings) applyStyleOverrides(doc, pTitle, styleSettings.heading1);
+        if (ch.level === 1) {
+             l1ChapterIndex++;
+             chapterCounters = { fig: 0, tbl: 0, eq: 0 };
+             
+             if (protos.h1) {
+                pTitle = cloneWithText(doc, protos.h1, titleText);
+                if(styleSettings) applyStyleOverrides(doc, pTitle, styleSettings.heading1);
+             }
         } else if (ch.level === 2 && protos.h2) {
              pTitle = cloneWithText(doc, protos.h2, titleText);
              if(styleSettings) applyStyleOverrides(doc, pTitle, styleSettings.heading2);
@@ -889,7 +903,7 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
         if (pTitle) body.insertBefore(pTitle, anchorNode);
 
         if (ch.content) {
-            const contentNodes = createContentNodes(ch.content, doc, protos, headingStyles[1] || "1", styleSettings);
+            const contentNodes = createContentNodes(ch.content, doc, protos, l1ChapterIndex, chapterCounters, styleSettings);
             contentNodes.forEach(n => body.insertBefore(n, anchorNode));
         }
 
@@ -898,7 +912,6 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
 
     thesis.chapters.forEach(insertChapter);
 
-    // Reference Insertion
     const currentKids = Array.from(body.children);
     const refHeader = currentKids.find(n => {
         if (n.localName !== 'p') return false;
@@ -920,28 +933,30 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
             let sampleRun = getChildByTagNameNS(protos.refEntry!, NS.w, "r");
             if (!sampleRun) sampleRun = doc.createElementNS(NS.w, "w:r");
 
-            // Avoid "[1][1]" by stripping [1] from description
             const cleanDesc = stripRefPrefix(ref.description);
 
+            const createCleanRun = (text: string) => {
+                const r = sampleRun!.cloneNode(true) as Element;
+                const rPr = getChildByTagNameNS(r, NS.w, "rPr");
+                while(r.firstChild) r.removeChild(r.firstChild);
+                if(rPr) r.appendChild(rPr);
+                const t = doc.createElementNS(NS.w, "w:t");
+                t.setAttribute("xml:space", "preserve");
+                t.textContent = text;
+                r.appendChild(t);
+                return r;
+            };
+
             pRef.appendChild(createBookmark(doc, bmName, bmId, "start"));
-            
-            const r = sampleRun!.cloneNode(true) as Element;
-            const rPr = getChildByTagNameNS(r, NS.w, "rPr");
-            while(r.firstChild) r.removeChild(r.firstChild);
-            if(rPr) r.appendChild(rPr);
-            const t = doc.createElementNS(NS.w, "w:t");
-            t.setAttribute("xml:space", "preserve");
-            t.textContent = `[${ref.id}] ${cleanDesc}`;
-            r.appendChild(t);
-            pRef.appendChild(r);
+            pRef.appendChild(createCleanRun(`[${ref.id}]`));
             pRef.appendChild(createBookmark(doc, bmName, bmId, "end"));
+            pRef.appendChild(createCleanRun(` ${cleanDesc}`));
 
             if(styleSettings) applyStyleOverrides(doc, pRef, styleSettings.reference);
             body.insertBefore(pRef, insertRefAfter);
         });
     }
 
-    // Update Fields
     const settingsPart = getPkgPart(doc, "/word/settings.xml");
     if (settingsPart) {
         const settingsRoot = getPartXmlRoot(settingsPart);

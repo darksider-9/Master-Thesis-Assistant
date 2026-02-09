@@ -199,4 +199,5 @@ export interface StyleSettings {
   caption: StyleConfig;
   table: StyleConfig; 
   reference: StyleConfig;
+  equationSeparator?: '-' | '.'; // New: Choose between (3-1) or (3.1)
 }

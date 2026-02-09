@@ -12,10 +12,17 @@ const cleanJsonText = (text: string) => {
 const cleanMarkdownArtifacts = (text: string) => {
   if (!text) return "";
   return text
+    // Remove bold markers **text** -> text
     .replace(/\*\*(.*?)\*\*/g, '$1') 
-    .replace(/\*(.*?)\*/g, '$1')     
+    // Remove italic markers *text* -> text
+    .replace(/(^|[^\*])\*([^\*]+)\*(?!\*)/g, '$1$2')     
+    // Remove list bullets at start of line (* Item -> Item)
+    .replace(/^\s*[\*\-]\s+/gm, '')
+    // Remove markdown headers
     .replace(/^#+\s+/gm, '')         
+    // Remove backticks
     .replace(/`/g, '')
+    // Remove underscores
     .replace(/__+/g, '');              
 };
 
@@ -280,6 +287,7 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
          例如: "根据文献 [[REF:U-Net original paper, keywords: CT unet]] 的方法..." 或 "相关研究表明 [[REF:ResNet]] ..."。
        - **绝对禁止**使用 Markdown 图片或表格语法。
     3. **段落**：普通文本段落之间用换行符分隔即可。不要使用 XML/HTML 标签。
+    4. **禁止使用 Markdown 列表符号**：请直接使用文本描述，或用"首先，... 其次，..."来表达列表逻辑，不要使用 "* Item" 或 "- Item" 格式。
 
     请开始撰写：
   `;
@@ -512,6 +520,7 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
        }).join('');
        
        // Ref Indexing
+       // Replaces placeholder [[REF:desc]] with [[REF:1]] (new structure) instead of plain [1]
        return txt.replace(/(\[\[REF:(.*?)\]\]|\[(\d+)\])/g, (match, pFull, pDesc, pId) => {
             let description = "";
             if (pDesc) description = pDesc.trim();
@@ -531,7 +540,8 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
                 assignedId = nextId++;
                 finalRefOrder.push({ id: assignedId, description, placeholder: match });
             }
-            return `[${assignedId}]`;
+            // IMPORTANT CHANGE: Return [[REF:ID]] so XML parser detects it as a reference, not plain text.
+            return `[[REF:${assignedId}]]`;
        });
    };
 
