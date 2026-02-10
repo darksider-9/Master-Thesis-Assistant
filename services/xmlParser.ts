@@ -1229,11 +1229,12 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
              }
          }
          
-         if (lostSectPr && lastInsertedPara && lastInsertedPara.localName === 'p') {
-             let pPr = getChildByTagNameNS(lastInsertedPara, NS.w, "pPr");
+         const targetPara = lastInsertedPara as Element | null;
+         if (lostSectPr && targetPara && targetPara.localName === 'p') {
+             let pPr = getChildByTagNameNS(targetPara, NS.w, "pPr");
              if (!pPr) {
                  pPr = doc.createElementNS(NS.w, "w:pPr");
-                 lastInsertedPara.insertBefore(pPr, lastInsertedPara.firstChild);
+                 targetPara.insertBefore(pPr, targetPara.firstChild);
              }
              const oldSectPr = getChildByTagNameNS(pPr, NS.w, "sectPr");
              if (oldSectPr) pPr.removeChild(oldSectPr);
