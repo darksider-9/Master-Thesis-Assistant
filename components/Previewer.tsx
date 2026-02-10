@@ -382,7 +382,7 @@ const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }
                 </div>
 
                 <div className="mt-4 p-3 bg-blue-50 text-blue-700 text-[10px] rounded leading-relaxed">
-                    注：导出时系统已强制移除标题的自动编号属性，转为手动全标题模式，以解决 Word 中编号丢失或双重编号的问题。请在 Word 中更新域代码（全选 -> F9）以刷新页眉。
+                    注：导出时系统已强制移除标题的自动编号属性，转为手动全标题模式，以解决 Word 中编号丢失或双重编号的问题。请在 Word 中更新域代码（全选 → F9）以刷新页眉。
                 </div>
             </div>
         )}
