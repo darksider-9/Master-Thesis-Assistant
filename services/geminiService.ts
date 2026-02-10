@@ -26,6 +26,33 @@ const cleanMarkdownArtifacts = (text: string) => {
     .replace(/__+/g, '');              
 };
 
+// --- CONSTANTS: Human-like Writing Style Guide ---
+const HUMAN_WRITING_STYLE = `
+你是一名严谨的硕士研究生，擅长用地道中文学术表达改写论文，目标是彻底消除AI写作痕迹、降低AI检测率，让文字更像真人逐字撰写的学术文本。
+ 
+改写要求（严格执行）
+ 
+1. 句式必须长短交错
+禁止连续短句、禁止排比式结构。一段里先写长句铺陈，再跟短句收束，节奏自然起伏。
+2. 替换AI高频词
+不用：综上所述、由此可见、值得注意的是、非常重要、具有重要意义
+改用：不难发现、从这一角度看、结合实际分析、更为关键、起到关键作用
+3. 不用模板化连接词
+不用：首先、其次、最后、一方面、另一方面
+改用：进一步来看、与之相对、在此基础上、结合前文分析
+4. 加入真人思考痕迹
+适当加入插入语、补充说明、轻微限定语气，模拟人类写作的犹豫与严谨，例如：
+实际上、严格来说、在一定程度上、需要说明的是、值得注意的一点是
+5. 结构自然生长，不套模板
+不从总起句开始，直接从具体现象、数据、问题切入，逻辑逐步展开，不使用“总-分-总”僵硬格式。
+6. 保持学术正式，但不生硬
+语言符合硕士论文规范，不口语、不浮夸、不翻译腔，读起来流畅自然，像真实学生撰写。
+ 
+输出要求
+ 
+请直接输出改写后的正文，不解释、不标注、不额外说明。
+`;
+
 // Generic Generator Interface
 interface GenerationRequest {
     systemPrompt: string;
@@ -260,34 +287,45 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
   }
 
   const systemPrompt = `
-    角色：专业的学术论文撰写 Agent。
-    任务：撰写章节具体的**正文内容**。
+    ${HUMAN_WRITING_STYLE}
     
-    【论文背景】
+    【写作任务背景】
     题目：${thesisTitle}
     所属一级章节：${chapterLevel1.title}
-    
+    当前撰写标题：${targetSection.title} (Level ${targetSection.level})
+    ${isLevel1 ? "注意：这是章首语，请概括本章主要内容。" : "注意：请专注于本小节的具体技术/理论细节。"}
+
     【核心探讨上下文】
     ${discussionContextStr}
-
-    【撰写目标】
-    标题：${targetSection.title} (Level ${targetSection.level})
-    ${isLevel1 ? "注意：这是章首语，请概括本章主要内容。" : "注意：请专注于本小节的具体技术/理论细节。"}
     
     【用户指令】
     ${userInstructions ? userInstructions : "无"}
 
-    【格式规范 (CRITICAL)】
+    【专业术语与翻译名词规范 (CRITICAL)】
+    1. **严格区分“专业术语”与“普通翻译名词”**：
+       - **专业术语** (具有行业公认英文缩写): 首次出现必须使用“中文全称 (英文全称, 英文缩写)”格式。
+         * 例如：“生成对抗网络 (Generative Adversarial Networks, GAN)”、“卷积神经网络 (Convolutional Neural Networks, CNN)”。
+         * 后续直接使用缩写 (如 "GAN", "CNN")。
+       - **普通翻译名词** (无特定缩写): 直接使用中文，**禁止**强行编造缩写或附带英文。
+         * 例如：“生成器”直接写“生成器”，**不要**写“生成器 (Generator, G)”或“生成器 (Generator)”。
+         * 例如：“损失函数”直接写“损失函数”，**不要**写“损失函数 (Loss Function)”。
+         * 例如：“编码器”、“注意力机制”、“鲁棒性”等均直接使用中文。
+    2. 确保缩写在当前章节内的上下文一致性。
+    3. 如果没有最简写的行业标准缩写，它就不是专业术语，请直接使用中文名称。
+
+    【格式占位符规范】
     1. **只输出正文**，不要输出章节标题。
     2. **特殊对象占位符** (解析器将自动将其转换为复杂的Word格式):
        - 插入图片：[[FIG:图片描述]]  (例如: [[FIG:U-Net网络结构图]])
        - 插入表格：[[TBL:表格描述]]
-       - 插入公式：[[EQ:公式内容]]
-       - 插入引用：**关键**：请明确包含引用文献的关键词或描述，以便后续索引。格式：[[REF:描述或关键词]]。
-         例如: "根据文献 [[REF:U-Net original paper, keywords: CT unet]] 的方法..." 或 "相关研究表明 [[REF:ResNet]] ..."。
-       - **绝对禁止**使用 Markdown 图片或表格语法。
-    3. **段落**：普通文本段落之间用换行符分隔即可。不要使用 XML/HTML 标签。
-    4. **禁止使用 Markdown 列表符号**：请直接使用文本描述，或用"首先，... 其次，..."来表达列表逻辑，不要使用 "* Item" 或 "- Item" 格式。
+       - **独立公式（带编号）**：[[EQ:公式内容]] (例如: [[EQ:E=mc^2]])
+       - **行内数学符号（无编号）**：[[SYM:数学符号]]
+         * 必须嵌入在句子中间，**禁止**在 [[SYM:...]] 前后加换行符！
+         * 使用标准 LaTeX 格式。
+       - 插入引用：[[REF:描述或关键词]]
+         * **禁止**在 [[REF:...]] 前后加换行符！
+         * 示例: "根据文献 [[REF:ResNet]] 的方法..."
+    3. **段落**：普通文本段落之间用换行符分隔。不要使用 XML/HTML 标签。
 
     请开始撰写：
   `;
@@ -340,7 +378,8 @@ const extractTermsAI = async (text: string, settings: ApiSettings): Promise<Tech
       CRITICAL FILTERING RULES:
       1. IGNORE figure/table citations like "Figure (1)", "Table (2)", "Eq. (3)".
       2. IGNORE common parentheses like "shown in (a)", "note (see below)".
-      3. EXTRACT ONLY true domain-specific terms (e.g., "Convolutional Neural Networks (CNN)", "Cone Beam CT (CBCT)").
+      3. EXTRACT ONLY true domain-specific terms (e.g., "Convolutional Neural Networks (CNN)").
+      4. IGNORE generic translated nouns like "Generator (Generator)", "Loss (Loss)". Only extract terms that have a DISTINCT valid acronym used in the field.
       
       Return JSON: { "terms": [ { "term": "中文全称", "acronym": "ACRONYM_OR_ENGLISH" } ] }
       Return empty list if none found.
@@ -363,16 +402,17 @@ const extractTermsAI = async (text: string, settings: ApiSettings): Promise<Tech
 // 2. Rewrite Agent
 const rewriteContentAI = async (text: string, instructions: string, settings: ApiSettings): Promise<string> => {
     const systemPrompt = `
-      You are a Technical Thesis Editor.
-      Your task is to REWRITE the provided text to strictly adhere to the terminology consistency rules provided.
+      ${HUMAN_WRITING_STYLE}
+
+      Task: REWRITE the provided text to strictly adhere to the terminology consistency rules provided.
       
       RULES:
-      1. Keep the original meaning, style, and length EXACTLY the same.
-      2. ONLY modify the technical terms as requested in the instructions.
+      1. Keep the original meaning and core content.
+      2. ONLY modify the technical terms as requested in the instructions, OR improve flow based on the human-writing style guide.
       3. Ensure the text flows naturally after modification.
-      4. Preserve all special placeholders like [[FIG:...]], [[REF:...]], [[EQ:...]].
+      4. Preserve all special placeholders like [[FIG:...]], [[REF:...]], [[EQ:...]], [[SYM:...]].
       
-      INSTRUCTIONS:
+      INSTRUCTIONS FROM TERM CHECKER:
       ${instructions}
     `;
 
@@ -508,12 +548,17 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
 
    const processBlock = (content: string): string => {
        if (!content) return "";
-       let txt = cleanMarkdownArtifacts(content);
+       // 1. First, aggressive cleanup of newlines around inline elements
+       const cleanedContent = content
+            .replace(/\n\s*(\[\[(?:SYM|REF):)/g, ' $1') // Remove newline before SYM/REF
+            .replace(/(\]\])\s*\n/g, '$1 ');            // Remove newline after SYM/REF
+
+       let txt = cleanMarkdownArtifacts(cleanedContent);
 
        // Space & Newline handling
-       const parts = txt.split(/(\[\[EQ:.*?\]\])/g);
+       const parts = txt.split(/(\[\[(?:EQ|SYM):.*?\]\])/g);
        txt = parts.map(part => {
-           if (part.startsWith('[[EQ:')) return part; 
+           if (part.startsWith('[[EQ:') || part.startsWith('[[SYM:')) return part; 
            let s = part.replace(/ {2,}/g, '\n'); 
            s = s.replace(/[ \t\r\f\v]+/g, ''); 
            return s;

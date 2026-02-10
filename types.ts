@@ -191,6 +191,12 @@ export interface StyleConfig {
   fontSizeName: FontSizeName; // Display name
 }
 
+export interface HeaderConfig {
+    oddPage: 'chapterTitle' | 'none';
+    evenPageText: string;
+    headerReferenceStyle?: string; // New: Allow manual override of the style name (e.g. "标题 1" vs "Heading 1")
+}
+
 export interface StyleSettings {
   heading1: StyleConfig;
   heading2: StyleConfig;
@@ -199,5 +205,6 @@ export interface StyleSettings {
   caption: StyleConfig;
   table: StyleConfig; 
   reference: StyleConfig;
-  equationSeparator?: '-' | '.'; // New: Choose between (3-1) or (3.1)
+  equationSeparator?: '-' | '.';
+  header: HeaderConfig; // New Header Config
 }

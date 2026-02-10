@@ -82,7 +82,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
     try {
       const userInstruction = instructions[nodeId] || "";
       
-      const content = await writeSingleSection({
+      let content = await writeSingleSection({
         thesisTitle: thesis.title,
         chapterLevel1: selectedChapter,
         targetSection: node.chapter,
@@ -92,6 +92,13 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
         settings: apiSettings,
         discussionHistory: selectedChapter.chatHistory
       });
+
+      // --- CRITICAL FIX: Aggressive Newline Cleaning ---
+      // AI sometimes ignores instructions and puts newlines around [[SYM:...]] or [[REF:...]].
+      // We strip these specific newlines immediately so they become inline elements.
+      content = content
+        .replace(/\n\s*(\[\[(?:SYM|REF):)/g, ' $1') // Remove newline before SYM or REF
+        .replace(/(\]\])\s*\n/g, '$1 ');            // Remove newline after SYM or REF
 
       setThesis(prev => ({
         ...prev,
@@ -161,20 +168,27 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
 
   const renderPreviewContent = (content: string) => {
      if (!content) return null;
-     return content.split(/(\[\[.*?\]\]|\n)/g)
-      .filter(p => p.trim())
-      .map((part, i) => {
-          if (part.startsWith("[[FIG:")) {
-             const desc = part.replace("[[FIG:", "").replace("]]", "");
+     
+     // 1. Split by double newlines first to identify Paragraphs.
+     // We do NOT split by single newline because that would break standard line wrapping.
+     // However, in our "clean" content, there shouldn't be single newlines inside paragraphs anyway unless AI messed up hard.
+     const paragraphs = content.split(/\n\s*\n/).filter(p => p.trim());
+
+     return paragraphs.map((paragraph, i) => {
+         // Check if this paragraph is a Block Placeholder
+         const trimmed = paragraph.trim();
+         
+         if (trimmed.startsWith("[[FIG:")) {
+             const desc = trimmed.replace("[[FIG:", "").replace("]]", "");
              return (
                <div key={i} className="my-2 p-3 bg-blue-50 border border-blue-100 rounded text-center shadow-sm">
                   <div className="w-20 h-20 bg-blue-100 mx-auto mb-2 flex items-center justify-center text-blue-400 rounded">IMG</div>
                   <div className="text-xs font-bold text-blue-600">图 [自动编号]: {desc}</div>
                </div>
              );
-          }
-          if (part.startsWith("[[TBL:")) {
-             const desc = part.replace("[[TBL:", "").replace("]]", "");
+         }
+         if (trimmed.startsWith("[[TBL:")) {
+             const desc = trimmed.replace("[[TBL:", "").replace("]]", "");
              return (
                <div key={i} className="my-2 p-3 bg-green-50 border border-green-100 rounded text-center shadow-sm">
                   <div className="text-xs font-bold text-green-600 mb-1">表 [自动编号]: {desc}</div>
@@ -184,18 +198,26 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                   </div>
                </div>
              );
-          }
-          if (part.startsWith("[[EQ:")) {
-            const content = part.replace("[[EQ:", "").replace("]]", "");
+         }
+         if (trimmed.startsWith("[[EQ:")) {
+            const eqText = trimmed.replace("[[EQ:", "").replace("]]", "");
             return (
               <div key={i} className="my-2 p-3 bg-slate-50 border border-slate-200 rounded text-center font-mono text-xs">
-                 {content}
+                 {eqText}
                  <div className="text-[10px] text-slate-400 mt-1">(公式 [自动编号])</div>
               </div>
             );
          }
-          return <p key={i} className="text-sm text-slate-700 leading-relaxed mb-2 indent-8 text-justify">{part}</p>;
-      });
+
+         // It's a regular paragraph (text). It might contain inline [[SYM:...]] or [[REF:...]].
+         // We do not need to split these for React rendering unless we want specific styling.
+         // If we just render string, React renders it inline.
+         return (
+            <p key={i} className="text-sm text-slate-700 leading-relaxed mb-2 indent-8 text-justify">
+               {paragraph}
+            </p>
+         );
+     });
   };
 
   if (!selectedChapter) return <div>请选择章节</div>;

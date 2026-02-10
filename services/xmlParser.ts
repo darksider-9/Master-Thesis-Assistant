@@ -22,6 +22,8 @@ const NS = {
   v: "urn:schemas-microsoft-com:vml"
 };
 
+const NS_RELS = "http://schemas.openxmlformats.org/package/2006/relationships";
+
 // -------------------- Text Normalization --------------------
 const normalizeTitle = (s: string) =>
   (s || "")
@@ -137,68 +139,235 @@ const isFrontMatterTitle = (txtRaw: string) => {
 const isListOfTablesTitle = (txtRaw: string) => normalizeForMatch(txtRaw) === normalizeForMatch(LOT_KEY);
 const isListOfFiguresTitle = (txtRaw: string) => normalizeForMatch(txtRaw) === normalizeForMatch(LOF_KEY);
 
-type TocFieldType = "toc" | "lot" | "lof";
-type TocField = { type: TocFieldType; depthId: number };
-
-// -------------------- Parsing Helpers --------------------
-const detectTocFieldOp = (p: Element) => {
-  const runs = p.getElementsByTagNameNS(NS.w, "r");
-  let sawBegin = false;
-  const instrHits: string[] = [];
-  let sawEnd = false;
-
-  for (let i = 0; i < runs.length; i++) {
-    const r = runs[i] as Element;
-    const fldChar = r.getElementsByTagNameNS(NS.w, "fldChar")[0] as Element | undefined;
-    if (fldChar) {
-      const t = getAttrNS(fldChar, NS.w, "fldCharType");
-      if (t === "begin") sawBegin = true;
-      if (t === "end") sawEnd = true;
-    }
-    const instrs = r.getElementsByTagNameNS(NS.w, "instrText");
-    for (let j = 0; j < instrs.length; j++) {
-      const it = (instrs[j].textContent || "").replace(/\s+/g, " ").trim();
-      if (it) instrHits.push(it);
-    }
-  }
-
-  const tocInstr = instrHits.find(x => /^TOC\b/.test(x));
-  let pushed: TocFieldType | null = null;
-  if (tocInstr) {
-    if (/\bc\s*"table"/i.test(tocInstr) || /\\c\s*"table"/i.test(tocInstr)) pushed = "lot";
-    else if (/\bc\s*"figure"/i.test(tocInstr) || /\\c\s*"figure"/i.test(tocInstr)) pushed = "lof";
-    else pushed = "toc";
-  }
-
-  return { sawBegin, sawEnd, pushed, instrHits };
-};
-
+// --- IMPROVED: Build Heading Styles with Heuristics ---
 const buildHeadingStyles = (stylesRoot: Element) => {
-  const res: Record<number, string> = {};
+  const candidates: Record<number, { id: string, name: string }[]> = { 1: [], 2: [], 3: [] };
+  
   const styles = stylesRoot.getElementsByTagNameNS(NS.w, "style");
   for (let i = 0; i < styles.length; i++) {
     const st = styles[i];
     if (getAttrNS(st, NS.w, "type") !== "paragraph") continue;
     const sid = getAttrNS(st, NS.w, "styleId");
     if (!sid) continue;
+
+    // Get Name
+    const nameNode = getChildByTagNameNS(st, NS.w, "name");
+    const nameVal = nameNode ? getAttrNS(nameNode, NS.w, "val") || "" : "";
+
     const pPr = getChildByTagNameNS(st, NS.w, "pPr");
     if (!pPr) continue;
     const ol = getChildByTagNameNS(pPr, NS.w, "outlineLvl");
     if (!ol) continue;
     const v = getAttrNS(ol, NS.w, "val");
     if (v === null) continue;
-    const lvl = parseInt(v, 10);
+    
+    const lvl = parseInt(v, 10); // 0 = Heading 1, 1 = Heading 2 ...
     if (!Number.isNaN(lvl)) {
-      if (lvl === 0 && !res[1]) res[1] = sid;
-      else if (lvl === 1 && !res[2]) res[2] = sid;
-      else if (lvl === 2 && !res[3]) res[3] = sid;
+       const mappedLvl = lvl + 1; // Map 0->1, 1->2
+       if (mappedLvl >= 1 && mappedLvl <= 3) {
+           candidates[mappedLvl].push({ id: sid, name: nameVal });
+       }
     }
   }
-  res[1] ||= "2";
-  res[2] ||= "4";
-  res[3] ||= "5";
-  return res;
+
+  const pickBest = (lvl: number, defaultId: string) => {
+      const list = candidates[lvl];
+      if (!list || list.length === 0) return defaultId;
+      
+      // Priority 1: Name contains "Heading X" or "标题 X"
+      const nameMatch = list.find(c => {
+          const n = c.name.toLowerCase();
+          return n.includes(`heading ${lvl}`) || n.includes(`标题 ${lvl}`) || n.includes(`heading${lvl}`) || n.includes(`标题${lvl}`);
+      });
+      if (nameMatch) return nameMatch.id;
+
+      // Priority 2: ID contains "HeadingX" or just "X"
+      const idMatch = list.find(c => {
+          const id = c.id.toLowerCase();
+          return id === `${lvl}` || id === `heading${lvl}` || id.includes(`heading${lvl}`);
+      });
+      if (idMatch) return idMatch.id;
+
+      // Fallback: First one found
+      return list[0].id;
+  };
+
+  return {
+      1: pickBest(1, "2"),
+      2: pickBest(2, "4"),
+      3: pickBest(3, "5")
+  };
 };
+
+// Helper to get Style Name from ID (Important for Headers)
+const getStyleNameById = (stylesRoot: Element, styleId: string): string | null => {
+    const styles = stylesRoot.getElementsByTagNameNS(NS.w, "style");
+    for (let i = 0; i < styles.length; i++) {
+        if (getAttrNS(styles[i], NS.w, "styleId") === styleId) {
+            const nameNode = getChildByTagNameNS(styles[i], NS.w, "name");
+            return nameNode ? getAttrNS(nameNode, NS.w, "val") : styleId;
+        }
+    }
+    return styleId; // Fallback to ID if name not found
+};
+
+// --- NEW HELPER: Check for Auto Numbering in Styles ---
+const isStyleAutoNumbered = (stylesRoot: Element | null, styleId: string): boolean => {
+    if (!stylesRoot) return false;
+    const styles = stylesRoot.getElementsByTagNameNS(NS.w, "style");
+    for (let i = 0; i < styles.length; i++) {
+        const st = styles[i];
+        if (getAttrNS(st, NS.w, "styleId") === styleId) {
+            const pPr = getChildByTagNameNS(st, NS.w, "pPr");
+            if (pPr && pPr.getElementsByTagNameNS(NS.w, "numPr").length > 0) return true;
+        }
+    }
+    return false;
+};
+
+const isProtoAutoNumbered = (p: Element): boolean => {
+     const pPr = getChildByTagNameNS(p, NS.w, "pPr");
+     if (!pPr) return false;
+     return pPr.getElementsByTagNameNS(NS.w, "numPr").length > 0;
+};
+
+const getDocRelationships = (doc: Document): Record<string, string> => {
+    const relsPart = getPkgPart(doc, "/word/_rels/document.xml.rels");
+    const map: Record<string, string> = {};
+    if (!relsPart) return map;
+
+    const xmlData = getChildByTagNameNS(relsPart, NS.pkg, "xmlData");
+    if (!xmlData || !xmlData.firstElementChild) return map;
+
+    const rels = xmlData.firstElementChild.getElementsByTagNameNS(NS_RELS, "Relationship");
+    for (let i = 0; i < rels.length; i++) {
+        const id = rels[i].getAttribute("Id");
+        const target = rels[i].getAttribute("Target");
+        if (id && target) {
+            map[id] = target;
+        }
+    }
+    return map;
+};
+
+// -------------------- DEBUG HELPER --------------------
+export interface HeaderDebugInfo {
+    sectionIndex: number;
+    detectedH1Style: string;
+    sectionStartText: string; // NEW: The text starting this section
+    headers: {
+        type: string | null; // default (odd), even, first
+        file: string;
+        data: { text: string; fields: string[] };
+    }[];
+}
+
+export const inspectHeaderDebugInfo = (xmlString: string): HeaderDebugInfo[] => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlString, "text/xml");
+    
+    // 1. Detect H1 Style Name for Debug Info
+    const stylesPart = getPkgPart(doc, "/word/styles.xml");
+    let detectedH1 = "Unknown";
+    if (stylesPart) {
+        const stylesRoot = getPartXmlRoot(stylesPart);
+        if (stylesRoot) {
+            const hStyles = buildHeadingStyles(stylesRoot);
+            detectedH1 = getStyleNameById(stylesRoot, hStyles[1]) || "Unknown";
+        }
+    }
+
+    // 2. Parse Relationships
+    const relsMap = getDocRelationships(doc);
+
+    // 3. Parse Headers Content Map
+    const headerContentMap: Record<string, {text: string, fields: string[]}> = {};
+    const parts = doc.getElementsByTagNameNS(NS.pkg, "part");
+    for(let i=0; i<parts.length; i++) {
+        const name = parts[i].getAttributeNS(NS.pkg, "name");
+        if(name && (name.includes("/word/header") || name.includes("/word/footer"))) {
+             // Extract content
+             const xmlData = getChildByTagNameNS(parts[i], NS.pkg, "xmlData");
+             const root = xmlData?.firstElementChild;
+             if(root) {
+                 const texts = Array.from(root.getElementsByTagNameNS(NS.w, "t")).map(n => n.textContent || "").join(" ");
+                 const instrs = Array.from(root.getElementsByTagNameNS(NS.w, "instrText")).map(n => n.textContent || "");
+                 // Cleanup name to match rels target (e.g. /word/header1.xml -> header1.xml)
+                 const shortName = name.split('/').pop()!;
+                 headerContentMap[shortName] = { text: texts, fields: instrs };
+             }
+        }
+    }
+
+    // 4. Scan Sections in Document (Improved Linear Scan)
+    const debugInfo: HeaderDebugInfo[] = [];
+    const docPart = getPkgPart(doc, "/word/document.xml");
+    const docRoot = getPartXmlRoot(docPart!);
+    const body = getChildByTagNameNS(docRoot!, NS.w, "body");
+    
+    if(body) {
+        let sectIndex = 1;
+        let currentSectionStartText = "";
+        
+        // Helper to extract refs from a sectPr
+        const extractRefs = (sectPr: Element, index: number, startText: string) => {
+            const refs = sectPr.getElementsByTagNameNS(NS.w, "headerReference");
+            const sectInfo: HeaderDebugInfo = { 
+                sectionIndex: index, 
+                detectedH1Style: detectedH1, 
+                sectionStartText: startText || "(空白节 / Empty Section)",
+                headers: [] 
+            };
+            for(let i=0; i<refs.length; i++) {
+                const type = refs[i].getAttributeNS(NS.w, "type"); // default (odd), even, first
+                const rid = refs[i].getAttributeNS(NS.r, "id");
+                if(rid && relsMap[rid]) {
+                    const target = relsMap[rid].split('/').pop()!;
+                    sectInfo.headers.push({
+                        type,
+                        file: target,
+                        data: headerContentMap[target] || { text: "Not Found", fields: [] }
+                    });
+                }
+            }
+            return sectInfo;
+        };
+
+        const children = Array.from(body.childNodes);
+        
+        for (let i = 0; i < children.length; i++) {
+            const node = children[i] as Element;
+            
+            if (node.localName === 'p') {
+                // Capture the start text of the section if we haven't yet
+                const text = getParaTextRaw(node).trim();
+                if (!currentSectionStartText && text) {
+                    currentSectionStartText = text.substring(0, 50);
+                }
+                
+                // Check for Section Break inside Paragraph Properties (pPr -> sectPr)
+                const pPr = getChildByTagNameNS(node, NS.w, "pPr");
+                const sectPr = pPr ? getChildByTagNameNS(pPr, NS.w, "sectPr") : null;
+                
+                if (sectPr) {
+                    // This section break ends the current section
+                    debugInfo.push(extractRefs(sectPr, sectIndex++, currentSectionStartText));
+                    currentSectionStartText = ""; // Reset for next section
+                }
+            } 
+            else if (node.localName === 'sectPr') {
+                // This is a standalone section break (usually end of doc, or odd formatting)
+                debugInfo.push(extractRefs(node, sectIndex++, currentSectionStartText));
+                currentSectionStartText = "";
+            }
+            else if (node.localName === 'tbl' && !currentSectionStartText) {
+                 currentSectionStartText = "[表格 / Table]";
+            }
+        }
+    }
+
+    return debugInfo;
+}
 
 // -------------------- GENERATION LOGIC --------------------
 
@@ -219,6 +388,7 @@ const findPrototypes = (body: Element, headingStyles: Record<number, string>): P
     const children = Array.from(body.children);
     let seenRefTitle = false;
 
+    // Pass 1: Strict Body Search (Avoid Front/Back Matter if possible)
     for (const node of children) {
         if (node.localName === 'tbl') {
             if (!protos.table) protos.table = node;
@@ -250,6 +420,18 @@ const findPrototypes = (body: Element, headingStyles: Record<number, string>): P
         }
         
         if (hasFieldSEQ(node) && !protos.caption) protos.caption = node;
+    }
+
+    // Pass 2: Fallback for H1 (If template is empty and only has Abstract/TOC as H1)
+    if (!protos.h1) {
+        for (const node of children) {
+            if (node.localName !== 'p') continue;
+            const styleId = extractStyleId(node);
+            if (styleId === headingStyles[1]) {
+                protos.h1 = node;
+                break;
+            }
+        }
     }
 
     if (!protos.normal) {
@@ -367,82 +549,125 @@ const createBookmark = (doc: Document, name: string, id: string, type: "start" |
     return el;
 };
 
-// --- Helpers for Headers & Math ---
-
-const createMathNode = (doc: Document, text: string) => {
-    const oMath = doc.createElementNS(NS.m, "m:oMath");
+// --- NEW HELPER: Strict Linear Math Run ---
+const createMathRun = (doc: Document, text: string) => {
     const r = doc.createElementNS(NS.m, "m:r");
-    // Standard Cambria Math font usage implies standard run properties are optional here, 
-    // but we can add them if needed. Word defaults are usually fine for inline math.
+    
+    // m:rPr with sty p (Strict Linear Format Hint)
+    const mRPr = doc.createElementNS(NS.m, "m:rPr");
+    const sty = doc.createElementNS(NS.m, "m:sty");
+    sty.setAttributeNS(NS.m, "m:val", "p");
+    mRPr.appendChild(sty);
+    r.appendChild(mRPr);
+
+    // w:rPr with Cambria Math
+    const wRPr = doc.createElementNS(NS.w, "w:rPr");
+    const rFonts = doc.createElementNS(NS.w, "w:rFonts");
+    rFonts.setAttributeNS(NS.w, "w:ascii", "Cambria Math");
+    rFonts.setAttributeNS(NS.w, "w:hAnsi", "Cambria Math");
+    wRPr.appendChild(rFonts);
+    r.appendChild(wRPr);
+
     const t = doc.createElementNS(NS.m, "m:t");
     t.textContent = text;
     r.appendChild(t);
-    oMath.appendChild(r);
-    return oMath;
+    
+    return r;
 };
 
-const fixStaticHeaders = (doc: Document) => {
+// --- Helpers for Headers & Math ---
+
+const updateHeadersAndFooters = (doc: Document, h1StyleName: string, settings?: StyleSettings, allowedParts?: Set<string>) => {
     const parts = doc.getElementsByTagNameNS(NS.pkg, "part");
+    
+    // User Override has priority, otherwise use auto-detected
+    const targetStyleName = settings?.header.headerReferenceStyle || h1StyleName || "标题 1";
+
     for (let i = 0; i < parts.length; i++) {
         const part = parts[i];
         const name = part.getAttributeNS(NS.pkg, "name");
-        // Look for header parts
-        if (name && name.includes("/word/header")) {
-            const xmlData = getChildByTagNameNS(part, NS.pkg, "xmlData");
-            if (!xmlData) continue;
+        
+        // Filter: Only process if it is a header/footer
+        const isHeaderFooter = name && (name.includes("/word/header") || name.includes("/word/footer"));
+        if (!isHeaderFooter) continue;
+        
+        // Filter: If allowedParts whitelist is provided, ensure this part is in it
+        if (allowedParts && name && !allowedParts.has(name)) {
+            continue;
+        }
+
+        const xmlData = getChildByTagNameNS(part, NS.pkg, "xmlData");
+        if (!xmlData) continue;
+
+        const root = xmlData.firstElementChild;
+        if (!root) continue;
+        
+        let foundTargetRef = false; // Flag to track if we've already handled the primary ref
+
+        // 1. Fix STYLEREF to point to the correct Heading 1 Style Name
+        const instrs = root.getElementsByTagNameNS(NS.w, "instrText");
+        
+        for (let j = 0; j < instrs.length; j++) {
+            const instrNode = instrs[j];
+            const text = instrNode.textContent || "";
             
-            // Search for specific static text nodes from the template
-            const texts = xmlData.getElementsByTagNameNS(NS.w, "t");
-            for (let j = 0; j < texts.length; j++) {
-                const tNode = texts[j];
-                const content = tNode.textContent || "";
-                if (content.includes("插图目录") || content.includes("表格目录")) {
-                    // Found a static header! We must replace this Run with a STYLEREF field.
-                    const run = tNode.parentNode as Element;
-                    const paragraph = run.parentNode as Element;
+            // Logic A: Standard STYLEREF Replacement
+            if (text.includes("STYLEREF") && settings?.header.oddPage === 'chapterTitle') {
+                const isMatchingTarget = text.includes(`"${targetStyleName}"`) || text.includes(targetStyleName);
+                
+                // If this is a STYLEREF to our target style...
+                if (isMatchingTarget || text.toLowerCase().includes("heading 1")) {
+                     if (foundTargetRef) {
+                         // DUPLICATE DETECTED: This is likely the second part of a [Num] [Text] split.
+                         // Since our L1 is now Manual (Full Text), we don't want this second one.
+                         // We replace it with an empty QUOTE field which renders nothing.
+                         instrNode.textContent = ' QUOTE "" ';
+                         continue;
+                     }
+                     
+                     // FIRST OCCURRENCE: Keep it, but ensure switches are clean so it shows Full Text.
+                     // Remove \n (num only) or \t (text only) switches to let it default to Full Text?
+                     // Actually, if we leave it as is, and the paragraph has NO numbering,
+                     // STYLEREF should default to text.
+                     // But if it has \n (num only), and there is no num, it might show nothing or weirdness.
+                     // Safest is to remove switches.
+                     let newText = text.replace(
+                        /STYLEREF\s+(?:\\"[^"]+\\"|"[^"]+"|[^\s\\]+)/i, 
+                        `STYLEREF "${targetStyleName}"`
+                    );
                     
-                    if (run.localName === "r" && paragraph.localName === "p") {
-                        // We use a simplified version of createFieldRuns here because we don't have a 'sampleRun' with styles from the header.
-                        // We'll clone the existing run to keep the header styles (font size, etc).
-                        const makeFieldRun = (type: 'begin' | 'end' | 'separate' | 'instr' | 'text', val?: string) => {
-                            const newR = run.cloneNode(true) as Element;
-                            while (newR.firstChild) newR.removeChild(newR.firstChild);
-                            const rPr = getChildByTagNameNS(run, NS.w, "rPr");
-                            if (rPr) newR.appendChild(rPr.cloneNode(true));
-                            
-                            if (type === 'text') {
-                                const t = doc.createElementNS(NS.w, "w:t");
-                                t.setAttribute("xml:space", "preserve");
-                                t.textContent = val || "";
-                                newR.appendChild(t);
-                            } else if (type === 'instr') {
-                                const it = doc.createElementNS(NS.w, "w:instrText");
-                                it.setAttribute("xml:space", "preserve");
-                                it.textContent = val || "";
-                                newR.appendChild(it);
-                            } else {
-                                const f = doc.createElementNS(NS.w, "w:fldChar");
-                                f.setAttributeNS(NS.w, "w:fldCharType", type);
-                                newR.appendChild(f);
-                            }
-                            return newR;
-                        };
+                    // Remove common switches \n, \r, \t to force full paragraph capture
+                    // Preserve \* MERGEFORMAT if you want, or just strip all switches
+                    // Let's strip \n, \r, \t specifically.
+                    newText = newText.replace(/\\n/gi, "").replace(/\\r/gi, "").replace(/\\t/gi, "");
+                    
+                    instrNode.textContent = newText;
+                    foundTargetRef = true;
+                    continue;
+                }
+            }
+            
+            // Logic B: Handle Split XML Nodes (Common in Word for "Heading 1" text only)
+            const trimmed = text.trim().replace(/^"/, "").replace(/"$/, ""); // Remove quotes
+            const lowerTrimmed = trimmed.toLowerCase();
+            
+            if ((lowerTrimmed === "标题 1" || lowerTrimmed === "标题1" || lowerTrimmed === "heading 1" || lowerTrimmed === "heading1") && settings?.header.oddPage === 'chapterTitle') {
+                // If we already found a ref, this might be a loose node belonging to the second ref.
+                // It's hard to be precise without parsing context. 
+                // But generally, update the name.
+                instrNode.textContent = targetStyleName;
+            }
+        }
 
-                        const fieldRuns = [
-                            makeFieldRun('begin'),
-                            makeFieldRun('instr', ' STYLEREF "标题 1" \\* MERGEFORMAT '),
-                            makeFieldRun('separate'),
-                            makeFieldRun('text', '章节标题'), // Placeholder
-                            makeFieldRun('end')
-                        ];
-
-                        // Insert new runs before the old run, then remove the old run
-                        fieldRuns.forEach(fr => paragraph.insertBefore(fr, run));
-                        paragraph.removeChild(run);
-                        
-                        // Break after fixing this occurrence to avoid messing up if multiple text nodes existed for same string
-                        break; 
-                    }
+        // 2. Fix Static Text (Even Headers)
+        const texts = root.getElementsByTagNameNS(NS.w, "t");
+        for (let j = 0; j < texts.length; j++) {
+            const tNode = texts[j];
+            const content = tNode.textContent || "";
+            // If it matches the school name pattern or is just a static even header
+            if (content.includes("东南大学硕士学位论文") || content.includes("硕士学位论文")) {
+                if (settings?.header.evenPageText) {
+                    tNode.textContent = settings.header.evenPageText;
                 }
             }
         }
@@ -461,7 +686,14 @@ const createContentNodes = (
     const nodes: Element[] = [];
     if (!contentRaw) return nodes;
 
-    const blockParts = contentRaw.split(/(\[\[(?:FIG|TBL):.*?\]\])/g);
+    // --- STRATEGY CHANGE: PRE-PROCESS TO FORCE BLOCK ELEMENTS ONTO NEW LINES ---
+    // If AI outputs "Text [[EQ:...]] Text", we force it to: "Text \n\n [[EQ:...]] \n\n Text"
+    // This ensures they are split into separate paragraphs below.
+    // We use a specific regex to capture FIG, TBL, EQ blocks.
+    const processedRaw = contentRaw
+        .replace(/(\[\[(?:FIG|TBL|EQ):[\s\S]*?\]\])/g, "\n\n$1\n\n");
+
+    const paragraphs = processedRaw.split(/\n\s*\n/).filter(p => p.trim());
     
     const baseProto = protos.normal || protos.h1;
     if (!baseProto) return nodes;
@@ -473,13 +705,14 @@ const createContentNodes = (
         sampleRun.appendChild(rPr);
     }
 
-    blockParts.forEach(part => {
-        if (!part) return; 
+    paragraphs.forEach(pText => {
+        const trimmed = pText.trim();
+        if (!trimmed) return;
 
-        // CASE A: Figure
-        if (part.startsWith("[[FIG:")) {
+        // --- BLOCK ELEMENTS (Exclusive Paragraphs) ---
+        if (trimmed.startsWith("[[FIG:")) {
              counters.fig++;
-             const desc = part.replace(/^\[\[FIG:/, "").replace(/\]\]$/, "");
+             const desc = trimmed.replace(/^\[\[FIG:/, "").replace(/\]\]$/, "");
              const bmId = (globalId++).toString();
              const bmName = `_Fig_${bmId}`;
              
@@ -537,10 +770,9 @@ const createContentNodes = (
              if (styleSettings) applyStyleOverrides(doc, pCap, styleSettings.caption);
              nodes.push(pCap);
         }
-        // CASE B: Table
-        else if (part.startsWith("[[TBL:")) {
+        else if (trimmed.startsWith("[[TBL:")) {
              counters.tbl++;
-             const desc = part.replace(/^\[\[TBL:/, "").replace(/\]\]$/, "");
+             const desc = trimmed.replace(/^\[\[TBL:/, "").replace(/\]\]$/, "");
              
              let pCap = protos.caption ? protos.caption.cloneNode(true) as Element : baseProto.cloneNode(true) as Element;
              const capPr = getChildByTagNameNS(pCap, NS.w, "pPr");
@@ -595,35 +827,67 @@ const createContentNodes = (
                  nodes.push(tNode);
              }
         }
-        // CASE C: Text
+        else if (trimmed.startsWith("[[EQ:")) {
+             counters.eq++;
+             const eqText = trimmed.replace(/^\[\[EQ:/, "").replace(/\]\]$/, "");
+             
+             const p = baseProto.cloneNode(true) as Element;
+             // clear children but keep pPr using simpler logic
+             const pPr = getChildByTagNameNS(p, NS.w, "pPr");
+             while (p.lastChild) {
+                 if (p.lastChild !== pPr) p.removeChild(p.lastChild);
+                 else if (p.childNodes.length === 1) break;
+                 else p.removeChild(p.lastChild); 
+             }
+             if (pPr && !p.firstChild) p.appendChild(pPr);
+
+             const oMathPara = doc.createElementNS(NS.m, "m:oMathPara");
+             const oMath = doc.createElementNS(NS.m, "m:oMath");
+             oMathPara.appendChild(oMath);
+
+             const separator = styleSettings?.equationSeparator || '-';
+             // Linear format string for Word to compile
+             const linearMathString = `${eqText}#(${chapterIndex}${separator}${counters.eq})`;
+             
+             // Use Strict Math Run (Equation 2 Style)
+             const mR = createMathRun(doc, linearMathString);
+             oMath.appendChild(mR);
+
+             p.appendChild(oMathPara);
+             nodes.push(p);
+        }
+        // --- TEXT PARAGRAPHS (May contain Inline SYM/REF) ---
         else {
-            const paragraphLines = part.split(/\n+/);
-            paragraphLines.forEach(line => {
-                if (line.length === 0) return; 
+             const p = baseProto.cloneNode(true) as Element;
+             const pPr = getChildByTagNameNS(p, NS.w, "pPr");
+             while (p.firstChild) if(p.firstChild !== pPr) p.removeChild(p.firstChild); else p.removeChild(p.firstChild);
+             if (pPr) p.appendChild(pPr);
 
-                const p = baseProto.cloneNode(true) as Element;
-                const pPr = getChildByTagNameNS(p, NS.w, "pPr");
-                while (p.firstChild) if(p.firstChild !== pPr) p.removeChild(p.firstChild); else p.removeChild(p.firstChild);
-                if (pPr) p.appendChild(pPr);
-
-                const subParts = line.split(/(\[\[(?:REF|EQ):.*?\]\])/g);
-                
-                subParts.forEach(sp => {
-                    if (!sp) return;
-
-                    if (sp.match(/^\[\[REF:\d+\]\]$/)) {
-                        const id = sp.match(/\d+/)?.[0];
+             // Split by inline tags
+             const parts = trimmed.split(/(\[\[(?:SYM|REF):.*?\]\])/g);
+             
+             parts.forEach(part => {
+                 if (!part) return;
+                 
+                 if (part.startsWith("[[SYM:")) {
+                    const symText = part.replace(/^\[\[SYM:/, "").replace(/\]\]$/, "");
+                    
+                    const oMath = doc.createElementNS(NS.m, "m:oMath");
+                    // Use Strict Math Run for Inline too
+                    const mR = createMathRun(doc, symText);
+                    oMath.appendChild(mR);
+                    p.appendChild(oMath);
+                 } 
+                 else if (part.startsWith("[[REF:")) {
+                    if (part.match(/^\[\[REF:\d+\]\]$/)) {
+                        const id = part.match(/\d+/)?.[0];
                         const bmName = `_Ref_${id}_target`;
                         
                         const refRun = sampleRun!.cloneNode(true) as Element;
                         while (refRun.firstChild) refRun.removeChild(refRun.firstChild);
-
                         let rPr = getChildByTagNameNS(sampleRun!, NS.w, "rPr");
-                        if (rPr) {
-                            rPr = rPr.cloneNode(true) as Element;
-                        } else {
-                            rPr = doc.createElementNS(NS.w, "w:rPr");
-                        }
+                        if (rPr) rPr = rPr.cloneNode(true) as Element;
+                        else rPr = doc.createElementNS(NS.w, "w:rPr");
                         refRun.appendChild(rPr);
                         
                         const vertAlign = doc.createElementNS(NS.w, "w:vertAlign");
@@ -631,66 +895,28 @@ const createContentNodes = (
                         rPr.appendChild(vertAlign);
                         
                         createFieldRuns(doc, refRun, `REF ${bmName} \\h`, `[${id}]`).forEach(n => p.appendChild(n));
-                    } 
-                    else if (sp.startsWith("[[EQ:")) {
-                         counters.eq++;
-                         const eqText = sp.replace(/^\[\[EQ:/, "").replace(/\]\]$/, "");
-                         
-                         // 1. MathML Object (Inline)
-                         // We insert the math object directly into the paragraph
-                         const mathNode = createMathNode(doc, eqText);
-                         p.appendChild(mathNode);
-
-                         // 2. Spacing
-                         const rSpace = sampleRun!.cloneNode(true) as Element;
-                         while(rSpace.firstChild) rSpace.removeChild(rSpace.firstChild);
-                         const rPrSpace = getChildByTagNameNS(sampleRun!, NS.w, "rPr");
-                         if(rPrSpace) rSpace.appendChild(rPrSpace.cloneNode(true));
-                         const tSpace = doc.createElementNS(NS.w, "w:t");
-                         tSpace.setAttribute("xml:space", "preserve");
-                         tSpace.textContent = "\u00A0\u00A0\u00A0\u00A0"; 
-                         rSpace.appendChild(tSpace);
-                         p.appendChild(rSpace);
-
-                         // 3. Numbering
-                         const separator = styleSettings?.equationSeparator || '-';
-                         const appendText = (txt: string) => {
-                             const rNum = sampleRun!.cloneNode(true) as Element;
-                             const rPrNum = getChildByTagNameNS(rNum, NS.w, "rPr");
-                             while(rNum.firstChild) rNum.removeChild(rNum.firstChild);
-                             if(rPrNum) rNum.appendChild(rPrNum);
-                             const tNum = doc.createElementNS(NS.w, "w:t");
-                             tNum.setAttribute("xml:space", "preserve");
-                             tNum.textContent = txt;
-                             rNum.appendChild(tNum);
-                             p.appendChild(rNum);
-                         };
-
-                         appendText("(");
-                         appendText(chapterIndex.toString());
-                         appendText(separator);
-                         createFieldRuns(doc, sampleRun!, "SEQ Equation \\* ARABIC \\s 1", counters.eq.toString()).forEach(n => p.appendChild(n));
-                         appendText(")");
                     }
-                    else {
-                         const r = sampleRun!.cloneNode(true) as Element;
-                         const rPr = getChildByTagNameNS(r, NS.w, "rPr");
-                         while(r.firstChild) r.removeChild(r.firstChild);
-                         if(rPr) r.appendChild(rPr);
-                         
-                         const t = doc.createElementNS(NS.w, "w:t");
-                         t.setAttribute("xml:space", "preserve");
-                         t.textContent = sp;
-                         r.appendChild(t);
-                         p.appendChild(r);
-                    }
-                });
-                
-                if (styleSettings) applyStyleOverrides(doc, p, styleSettings.body);
-                nodes.push(p);
-            });
+                 } 
+                 else {
+                     // Regular Text
+                     const r = sampleRun!.cloneNode(true) as Element;
+                     const rPr = getChildByTagNameNS(r, NS.w, "rPr");
+                     while(r.firstChild) r.removeChild(r.firstChild);
+                     if(rPr) r.appendChild(rPr);
+                     
+                     const t = doc.createElementNS(NS.w, "w:t");
+                     t.setAttribute("xml:space", "preserve");
+                     t.textContent = part;
+                     r.appendChild(t);
+                     p.appendChild(r);
+                 }
+             });
+             
+             if (styleSettings) applyStyleOverrides(doc, p, styleSettings.body);
+             nodes.push(p);
         }
     });
+
     return nodes;
 };
 
@@ -821,22 +1047,20 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
     const parser = new DOMParser();
     const doc = parser.parseFromString(rules.rawXML, "text/xml");
     
-    // FIX 1: Fix Static Headers before doing anything else
-    fixStaticHeaders(doc);
-
     const docPart = getPkgPart(doc, "/word/document.xml");
     const docRoot = getPartXmlRoot(docPart!);
     const body = getChildByTagNameNS(docRoot!, NS.w, "body");
     if (!body) throw new Error("Format Error: No body found");
 
     const stylesPart = getPkgPart(doc, "/word/styles.xml");
-    const stylesRoot = stylesPart ? getPartXmlRoot(stylesPart) : null;
+    const stylesRoot = getPartXmlRoot(stylesPart!);
     const headingStyles = stylesRoot ? buildHeadingStyles(stylesRoot) : {
         1: rules.styleIds.heading1, 2: rules.styleIds.heading2, 3: rules.styleIds.heading3
     };
 
-    const protos = findPrototypes(body, headingStyles);
+    const h1StyleName = stylesRoot ? getStyleNameById(stylesRoot, headingStyles[1]) : "标题 1";
 
+    // --- REORDERED LOGIC: Scan Body & Section Properties FIRST ---
     const children = Array.from(body.children);
     let startDeleteIdx = -1;
     let endDeleteIdx = -1;
@@ -865,7 +1089,64 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
         }
     }
     if (endDeleteIdx === -1) endDeleteIdx = children.length;
+
+    // --- NEW LOGIC: Robust Body SectPr Detection ---
+    let effectiveBodySectPr: Element | null = null;
+    if (startDeleteIdx !== -1) {
+        if (endDeleteIdx < children.length && children[endDeleteIdx].localName === 'sectPr') {
+             effectiveBodySectPr = children[endDeleteIdx];
+        } 
+        else {
+             for (let i = endDeleteIdx; i < children.length; i++) {
+                 const node = children[i];
+                 if (node.localName === 'sectPr') {
+                     effectiveBodySectPr = node;
+                     break;
+                 }
+                 if (node.localName === 'p') {
+                     const pPr = getChildByTagNameNS(node, NS.w, 'pPr');
+                     const sectPr = pPr ? getChildByTagNameNS(pPr, NS.w, 'sectPr') : null;
+                     if (sectPr) {
+                         effectiveBodySectPr = sectPr;
+                         break;
+                     }
+                 }
+             }
+        }
+        if (!effectiveBodySectPr) {
+            const last = body.lastElementChild;
+            if (last && last.localName === 'sectPr') effectiveBodySectPr = last;
+        }
+    }
+
+    // Identify Whitelisted Header Parts
+    let bodyHeaderPartNames: Set<string> | undefined = undefined;
+    if (startDeleteIdx !== -1 && effectiveBodySectPr) {
+        const relsMap = getDocRelationships(doc);
+        const headerRefs = effectiveBodySectPr.getElementsByTagNameNS(NS.w, "headerReference");
+        if (headerRefs.length > 0) {
+            bodyHeaderPartNames = new Set();
+            for (let i = 0; i < headerRefs.length; i++) {
+                const rid = getAttrNS(headerRefs[i], NS.r, "id");
+                if (rid && relsMap[rid]) {
+                    const target = relsMap[rid];
+                    const partName = target.startsWith('/') ? `/word${target}` : `/word/${target}`;
+                    bodyHeaderPartNames.add(partName);
+                }
+            }
+        }
+    }
+
+    // --- HEADER FIX START (Scoped to Body Parts) ---
+    // Update headers to point to this style name (not ID!)
+    updateHeadersAndFooters(doc, h1StyleName || "标题 1", styleSettings, bodyHeaderPartNames);
+    // --- HEADER FIX END ---
+
+    const protos = findPrototypes(body, headingStyles);
+
     let anchorNode: Node | null = null;
+    
+    // --- Remove Old Body Content ---
     if (startDeleteIdx !== -1) {
         const toRemove = children.slice(startDeleteIdx, endDeleteIdx);
         toRemove.forEach(n => body.removeChild(n));
@@ -877,40 +1158,88 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
 
     let l1ChapterIndex = 0;
     let chapterCounters = { fig: 0, tbl: 0, eq: 0 };
+    let lastInsertedPara: Element | null = null;
 
     const insertChapter = (ch: typeof thesis.chapters[0]) => {
         let pTitle: Element | null = null;
-        const titleText = stripHeadingNumbering(ch.title);
-
+        let titleText = ch.title;
+        
         if (ch.level === 1) {
              l1ChapterIndex++;
              chapterCounters = { fig: 0, tbl: 0, eq: 0 };
              
              if (protos.h1) {
+                // LEVEL 1: Use Manual Full Title ("第一章 绪论")
+                // Do NOT strip prefix.
+                // Do REMOVE numPr to prevent double numbering (since we manually typed "第一章")
                 pTitle = cloneWithText(doc, protos.h1, titleText);
+                
+                const pPr = getChildByTagNameNS(pTitle, NS.w, "pPr");
+                if (pPr) {
+                    const numPr = getChildByTagNameNS(pPr, NS.w, "numPr");
+                    if (numPr) pPr.removeChild(numPr);
+                }
+
                 if(styleSettings) applyStyleOverrides(doc, pTitle, styleSettings.heading1);
              }
         } else if (ch.level === 2 && protos.h2) {
-             pTitle = cloneWithText(doc, protos.h2, titleText);
+             // LEVEL 2: STRIP Prefix ("1.1 标题" -> "标题").
+             // Do NOT remove numPr (rely on Auto Numbering to add "1.1")
+             const strippedTitle = stripHeadingNumbering(titleText);
+             pTitle = cloneWithText(doc, protos.h2, strippedTitle);
              if(styleSettings) applyStyleOverrides(doc, pTitle, styleSettings.heading2);
         } else if (ch.level === 3 && protos.h3) {
-             pTitle = cloneWithText(doc, protos.h3, titleText);
+             // LEVEL 3: STRIP Prefix ("1.1.1 标题" -> "标题").
+             // Do NOT remove numPr (rely on Auto Numbering to add "1.1.1")
+             const strippedTitle = stripHeadingNumbering(titleText);
+             pTitle = cloneWithText(doc, protos.h3, strippedTitle);
              if(styleSettings) applyStyleOverrides(doc, pTitle, styleSettings.heading3);
         } else {
              pTitle = cloneWithText(doc, protos.h1 || protos.normal!, titleText);
         }
 
-        if (pTitle) body.insertBefore(pTitle, anchorNode);
+        if (pTitle) {
+            body.insertBefore(pTitle, anchorNode);
+            lastInsertedPara = pTitle;
+        }
 
         if (ch.content) {
             const contentNodes = createContentNodes(ch.content, doc, protos, l1ChapterIndex, chapterCounters, styleSettings);
-            contentNodes.forEach(n => body.insertBefore(n, anchorNode));
+            contentNodes.forEach(n => {
+                body.insertBefore(n, anchorNode);
+                lastInsertedPara = n;
+            });
         }
 
         if (ch.subsections) ch.subsections.forEach(insertChapter);
     };
 
     thesis.chapters.forEach(insertChapter);
+    
+    // --- Re-attach Body Section Properties (Same logic as before) ---
+    if (startDeleteIdx !== -1) {
+         const lastRemoved = children[endDeleteIdx - 1];
+         let lostSectPr: Element | null = null;
+         if (lastRemoved) {
+             if (lastRemoved.localName === 'sectPr') lostSectPr = lastRemoved;
+             else if (lastRemoved.localName === 'p') {
+                 const pPr = getChildByTagNameNS(lastRemoved, NS.w, 'pPr');
+                 const sp = pPr ? getChildByTagNameNS(pPr, NS.w, 'sectPr') : null;
+                 if (sp) lostSectPr = sp;
+             }
+         }
+         
+         if (lostSectPr && lastInsertedPara && lastInsertedPara.localName === 'p') {
+             let pPr = getChildByTagNameNS(lastInsertedPara, NS.w, "pPr");
+             if (!pPr) {
+                 pPr = doc.createElementNS(NS.w, "w:pPr");
+                 lastInsertedPara.insertBefore(pPr, lastInsertedPara.firstChild);
+             }
+             const oldSectPr = getChildByTagNameNS(pPr, NS.w, "sectPr");
+             if (oldSectPr) pPr.removeChild(oldSectPr);
+             pPr.appendChild(lostSectPr.cloneNode(true));
+         }
+    }
 
     const currentKids = Array.from(body.children);
     const refHeader = currentKids.find(n => {
