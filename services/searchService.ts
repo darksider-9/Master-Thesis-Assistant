@@ -1,0 +1,203 @@
+
+import { SearchProvider, SearchResult } from "../types";
+
+const TIMEOUT_MS = 10000;
+
+// Helper to fetch with timeout
+const fetchWithTimeout = async (url: string, options: RequestInit = {}) => {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(id);
+    return response;
+  } catch (error) {
+    clearTimeout(id);
+    throw error;
+  }
+};
+
+// 1. Semantic Scholar API
+const searchSemanticScholar = async (query: string, apiKey?: string): Promise<SearchResult[]> => {
+    // S2 Graph API (Free tier has limits, Key recommended for high volume)
+    // We request abstract, title, year, authors
+    const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(query)}&limit=5&fields=title,abstract,authors,year,url,venue`;
+    
+    const headers: HeadersInit = {};
+    if (apiKey) {
+        headers['x-api-key'] = apiKey;
+    }
+
+    const res = await fetchWithTimeout(url, { headers });
+    if (!res.ok) throw new Error(`S2 API Error: ${res.status}`);
+    const data = await res.json();
+    
+    if (!data.data) return [];
+
+    return data.data.map((item: any) => ({
+        id: item.paperId,
+        title: item.title,
+        abstract: item.abstract || "（暂无摘要）",
+        authors: item.authors?.map((a: any) => a.name) || [],
+        year: item.year?.toString() || "N/A",
+        url: item.url,
+        source: 'Semantic Scholar'
+    }));
+};
+
+// 2. ArXiv API (XML)
+const searchArxiv = async (query: string): Promise<SearchResult[]> => {
+    // ArXiv API is free and doesn't require key.
+    // Query format: all:keyword
+    const url = `https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=5`;
+    
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) throw new Error(`ArXiv API Error: ${res.status}`);
+    const text = await res.text();
+    
+    // Parse XML in Browser
+    const parser = new DOMParser();
+    const xmlDoc = parser.parseFromString(text, "text/xml");
+    const entries = xmlDoc.getElementsByTagName("entry");
+    
+    const results: SearchResult[] = [];
+    for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        const title = entry.getElementsByTagName("title")[0]?.textContent || "";
+        const summary = entry.getElementsByTagName("summary")[0]?.textContent || "";
+        const published = entry.getElementsByTagName("published")[0]?.textContent || "";
+        const id = entry.getElementsByTagName("id")[0]?.textContent || "";
+        const authorNodes = entry.getElementsByTagName("author");
+        const authors = [];
+        for(let j=0; j<authorNodes.length; j++) {
+            authors.push(authorNodes[j].getElementsByTagName("name")[0]?.textContent || "");
+        }
+
+        results.push({
+            id: id,
+            title: title.replace(/\s+/g, " ").trim(),
+            abstract: summary.replace(/\s+/g, " ").trim(),
+            authors: authors,
+            year: published.substring(0, 4), // YYYY-MM-DD
+            url: id,
+            source: 'ArXiv'
+        });
+    }
+    return results;
+};
+
+// 3. OpenAlex API
+const searchOpenAlex = async (query: string): Promise<SearchResult[]> => {
+    // Best Practice: Provide a mailto to get into the "Polite Pool" (faster, higher limits)
+    // We use a generic identification for this tool.
+    const politeMail = "thesis_assistant_user@example.com"; 
+    const url = `https://api.openalex.org/works?search=${encodeURIComponent(query)}&filter=has_abstract:true&per-page=5&mailto=${politeMail}`;
+    
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) throw new Error(`OpenAlex API Error: ${res.status}`);
+    const data = await res.json();
+    
+    // Helper to reconstruct Inverted Index abstract
+    const reconstructAbstract = (inverted: any) => {
+        if (!inverted) return "";
+        const sorted = Object.entries(inverted).flatMap(([word, positions]: any) => 
+            positions.map((pos: number) => ({ word, pos }))
+        ).sort((a: any, b: any) => a.pos - b.pos);
+        return sorted.map((x: any) => x.word).join(" ");
+    };
+
+    return data.results.map((item: any) => {
+        // Newer OpenAlex API sometimes has 'abstract' field directly if reconstructed, 
+        // but typically it's abstract_inverted_index
+        const abstractText = reconstructAbstract(item.abstract_inverted_index) || "（摘要解析失败）";
+
+        return {
+            id: item.id,
+            title: item.title,
+            abstract: abstractText,
+            authors: item.authorships?.map((a: any) => a.author.display_name) || [],
+            year: item.publication_year?.toString() || "N/A",
+            url: item.doi || item.id,
+            source: 'OpenAlex'
+        };
+    });
+};
+
+// 4. Crossref API
+const searchCrossref = async (query: string): Promise<SearchResult[]> => {
+    // Best Practice: Provide a mailto for Polite Pool
+    const politeMail = "thesis_assistant_user@example.com";
+    const url = `https://api.crossref.org/works?query=${encodeURIComponent(query)}&rows=5&mailto=${politeMail}`;
+    
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) throw new Error(`Crossref API Error: ${res.status}`);
+    const data = await res.json();
+    
+    return data.message.items.map((item: any) => ({
+        id: item.DOI,
+        title: item.title?.[0] || "Untitled",
+        abstract: item.abstract ? item.abstract.replace(/<[^>]+>/g, '') : "（Crossref 未提供摘要，建议仅作为引用元数据）",
+        authors: item.author?.map((a: any) => `${a.given} ${a.family}`) || [],
+        year: item.published?.['date-parts']?.[0]?.[0]?.toString() || "N/A",
+        url: item.URL,
+        source: 'Crossref'
+    }));
+};
+
+// 5. Serper API (Google Scholar)
+const searchSerper = async (query: string, apiKey: string): Promise<SearchResult[]> => {
+    if (!apiKey) throw new Error("Serper API 需要 API Key");
+    
+    const url = "https://google.serper.dev/scholar";
+    const raw = JSON.stringify({
+        "q": query,
+        "gl": "cn",
+        "hl": "zh-cn",
+        "num": 5
+    });
+
+    const res = await fetchWithTimeout(url, {
+        method: 'POST',
+        headers: {
+            'X-API-KEY': apiKey,
+            'Content-Type': 'application/json'
+        },
+        body: raw
+    });
+
+    if (!res.ok) throw new Error(`Serper API Error: ${res.status}`);
+    const data = await res.json();
+
+    return (data.organic || []).map((item: any) => ({
+        id: item.link || item.position,
+        title: item.title,
+        abstract: item.snippet || "（Google Scholar 未抓取到摘要片段）",
+        authors: [], // Serper doesn't strictly parse authors in 'organic' sometimes, contained in snippet
+        year: item.year || "N/A",
+        url: item.link,
+        source: 'Serper (Google Scholar)'
+    }));
+};
+
+// Unified Switcher
+export const searchAcademicPapers = async (
+    query: string, 
+    provider: SearchProvider, 
+    apiKey?: string
+): Promise<SearchResult[]> => {
+    switch (provider) {
+        case 'semantic_scholar':
+            return searchSemanticScholar(query, apiKey);
+        case 'arxiv':
+            return searchArxiv(query);
+        case 'open_alex':
+            return searchOpenAlex(query);
+        case 'crossref':
+            return searchCrossref(query);
+        case 'serper':
+            return searchSerper(query, apiKey || "");
+        case 'none':
+        default:
+            return [];
+    }
+};

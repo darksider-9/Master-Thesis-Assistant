@@ -1250,7 +1250,40 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
     });
 
     if (refHeader && references.length > 0 && protos.refEntry) {
+        // --- NEW LOGIC: Remove old dummy references from template ---
+        let sibling = refHeader.nextSibling;
+        const nodesToRemove: Node[] = [];
+        
+        // Scan forward until we hit something that clearly isn't a reference or end of doc
+        while (sibling) {
+            const next = sibling.nextSibling;
+            if (sibling.nodeType === 1 && (sibling as Element).localName === 'p') {
+                const text = getParaTextRaw(sibling as Element).trim();
+                // Heuristic: If it looks like [1] ... or is empty, remove it.
+                // If it looks like "Back Matter Title" (e.g. Thanks), stop.
+                if (isBackMatterTitle(text) && !text.includes("参考文献")) {
+                    break;
+                }
+                
+                // Matches [1], [12], 1., Reference 1, or empty
+                if (/^(\[\d+\]|\d+\.|Reference \d+)/i.test(text) || text === "") {
+                    nodesToRemove.push(sibling);
+                } else {
+                    // Stop if we hit a normal paragraph that doesn't look like a ref?
+                    // Safe bet: just stop.
+                    break;
+                }
+            } else if (sibling.nodeType === 1 && (sibling as Element).localName === 'sectPr') {
+                 // Stop at section break
+                 break;
+            }
+            sibling = next;
+        }
+        
+        nodesToRemove.forEach(n => body.removeChild(n));
+
         const insertRefAfter = refHeader.nextSibling;
+        
         references.forEach(ref => {
             const bmId = (globalId++).toString();
             const bmName = `_Ref_${ref.id}_target`;

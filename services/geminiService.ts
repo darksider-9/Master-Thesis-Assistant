@@ -1,6 +1,6 @@
 
 import { GoogleGenAI } from "@google/genai";
-import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings, ThesisStructure } from "../types";
+import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings, ThesisStructure, SkeletonResponse } from "../types";
 
 // --- OpenAI Compatible Interface ---
 
@@ -26,31 +26,114 @@ const cleanMarkdownArtifacts = (text: string) => {
     .replace(/__+/g, '');              
 };
 
-// --- CONSTANTS: Human-like Writing Style Guide ---
+// --- CONSTANTS: Human-like Writing Style Guide (Refined for Strict Academic Tone) ---
 const HUMAN_WRITING_STYLE = `
-你是一名严谨的硕士研究生，擅长用地道中文学术表达改写论文，目标是彻底消除AI写作痕迹、降低AI检测率，让文字更像真人逐字撰写的学术文本。
- 
-改写要求（严格执行）
- 
-1. 句式必须长短交错
-禁止连续短句、禁止排比式结构。一段里先写长句铺陈，再跟短句收束，节奏自然起伏。
-2. 替换AI高频词
-不用：综上所述、由此可见、值得注意的是、非常重要、具有重要意义
-改用：不难发现、从这一角度看、结合实际分析、更为关键、起到关键作用
-3. 不用模板化连接词
-不用：首先、其次、最后、一方面、另一方面
-改用：进一步来看、与之相对、在此基础上、结合前文分析
-4. 加入真人思考痕迹
-适当加入插入语、补充说明、轻微限定语气，模拟人类写作的犹豫与严谨，例如：
-实际上、严格来说、在一定程度上、需要说明的是、值得注意的一点是
-5. 结构自然生长，不套模板
-不从总起句开始，直接从具体现象、数据、问题切入，逻辑逐步展开，不使用“总-分-总”僵硬格式。
-6. 保持学术正式，但不生硬
-语言符合硕士论文规范，不口语、不浮夸、不翻译腔，读起来流畅自然，像真实学生撰写。
- 
-输出要求
- 
-请直接输出改写后的正文，不解释、不标注、不额外说明。
+你是一名严谨的顶尖大学博士生，正在撰写学位论文。你的目标是产出**极度专业、客观、逻辑致密**的学术文本，彻底消除AI生成的“翻译腔”和“口语化”痕迹。
+
+【严禁使用的词汇（Negative Constraints）】
+❌ **绝对禁止**使用以下口语化连接词或废话（出现即违规）：
+   - "不难发现"、"由此可见"、"值得注意的是"、"众所周知"、"显而易见"、"毫无疑问"
+   - "综上所述"、"总而言之"、"也就是说"、"换句话说"
+❌ **绝对禁止**使用空洞的强调词：
+   - "非常重要"、"极具意义"、"关键作用"（必须直接描述具体的技术作用或量化指标）。
+❌ **绝对禁止**使用小学生式的列表连接词：
+   - "首先...其次...最后..."（除非是描述严谨的算法步骤序列，否则请用逻辑递进或空间结构代替）。
+
+【强制执行的写作规范】
+1. **零连接词逻辑（Implicit Cohesion）**：
+   - 高水平的学术写作依靠句与句之间的逻辑内在联系（因果、转折、递进）来衔接，而不是靠“因此”、“但是”这些显性词。
+   - *Bad*: "首先使用了A方法，然后因为A方法效果不好，所以使用了B方法。"
+   - *Good*: "鉴于A方法在处理稀疏数据时收敛困难，本文引入B策略以增强特征提取的鲁棒性。"
+2. **客观被动语态**：
+   - 多用“本文提出”、“实验结果表明”、“数据分析显示”。
+   - 少用或不用“我们发现”、“我想”。
+3. **句式密度与信息量**：
+   - 避免短句碎读。学术长句应包含：条件状语（在xx条件下） + 核心主张（xx表现出xx特性） + 数据/理论支撑（误差降低了xx%）。
+4. **具体化**：
+   - 凡是涉及评价，必须带上限定条件。不要说“效果很好”，要说“在低信噪比环境下，Dice系数提升了3.5%”。
+
+【输出要求】
+请直接输出改写后的正文，**不要**包含“好的”、“根据您的要求”等任何对话性文字。
+`;
+
+const LOGIC_SKELETON_PROMPT = `
+你是“学位论文逻辑架构师”。你的任务是根据用户的【研究课题】、【核心探讨记录】以及可选的【参考范文】，为当前小节设计一个详细的**逻辑骨架**和**循证搜索计划**。
+
+【输入信息】
+1. 论文题目与当前章节信息。
+2. **核心探讨记录 (Critical)**: 用户之前与导师确认的方法论、数据和创新点。
+3. **参考范文 (Optional)**: 用户提供的师兄论文或模板段落。
+4. **用户指令**: 用户对本节的具体要求。
+
+========================
+0) 总原则与约束（必须遵守）
+- 不编造：不得凭空编造文献、实验结果。
+- 模板可学结构不可抄句：若提供 参考范文，只能学习其段落推进/语气/对比框架，禁止复用原句。
+- **关键词策略 (重要)**：
+  - **脉络延展性**：生成的关键词组必须覆盖该段落的逻辑演进。例如，如果段落是从“通用综述”讲到“具体缺陷”，关键词应包含宽泛的综述词和具体的缺陷词。
+  - **中英双语 (Bilingual)**：必须同时提供中文和英文关键词（各占50%），以支持在不同数据库（ArXiv/OpenAlex vs 知网/万方）中检索。
+  - **具体化**：严禁生成“深度学习”这种泛泛的词，必须是“基于Transformer的医学分割 (Transformer-based medical segmentation)”这种级别。
+
+========================
+A) 通用“逻辑词”词表（跨章节可复用）
+Level-1：Move（段落功能/修辞动作）
+Level-2：Slots（信息槽：段落里必须填的内容类型）
+
+A1. Level-1 Moves（通用，任何领域可实例化）
+【Intro/绪论类】
+- BG-Field：领域大背景/技术概述（是什么、为什么重要）
+- GAP-Problem：现有方法/系统的明确痛点（尽量量化或举例）
+- RW-Compare：代表性方案对比（优缺点/适用条件/限制）
+- OBJ-Goal：本文目标（解决什么、达到什么指标/性质）
+- ORG-Roadmap：论文结构安排（每章做什么）
+
+【Theory/Related/理论基础与相关工作】
+- DEF-Concept：概念定义、符号、变量、范围、假设
+- ALG-Canonical：经典方法/基线流程（可含步骤与伪代码级描述）
+- ISSUE-Phenomenon：关键“现象/问题表现”（你领域里可为伪影/误差/偏差/失败模式）
+- ISSUE-Mitigation：已有应对策略的范式分类（插值/重建/后处理/硬件/协议等）
+
+【Method/Algorithm/核心方法章】
+- PROB-Setup：问题定义（输入/输出/假设/符号/目标函数）
+- METHOD-Pipeline：方法总流程（模块1-2-3）
+- METHOD-Detail：关键步骤细化（公式/推导/复杂度/稳定性）
+- EXP-Design：实验设计（数据、对比方法、指标、消融、统计检验口径）
+- EXP-Result：结果呈现（定性图 + 定量表）
+- ANALYSIS-WhyWorks：原因分析（回扣 Insight/GAP，对应哪些模块起作用）
+
+A2. Level-2 Slots（所有 Move 统一使用）
+每个 skeleton block 必须填这些槽（没有材料也要标 TODO）：
+- Claim：这一段要表达的主张（1句）
+- Evidence：需要的证据类型（reference/data/formula/figure/table/comparison）
+- Mechanism：为什么成立（原理/推导/直觉）
+- KeywordsZH：中文检索词（3-5个，覆盖从宽泛到具体的脉络）
+- KeywordsEN：英文检索词（3-5个，对应英文术语，方便ArXiv/OpenAlex检索）
+
+========================
+C) 你的输出：严格 JSON
+{
+  "section_plans": [
+    {
+      "section_id": "...",
+      "skeleton_blocks": [
+        {
+          "block_id": "blk_1",
+          "move": "必须来自 A1 Move 词表",
+          "slots": {
+            "Claim": "本段核心主张 (e.g., 现有U-Net在处理边缘细节时存在模糊问题)",
+            "Evidence": ["reference|data|formula|figure|table|comparison"],
+            "KeywordsZH": ["U-Net 边缘模糊 原因", "医学图像分割 边界损失函数 综述"], 
+            "KeywordsEN": ["U-Net boundary fuzziness analysis", "medical segmentation boundary loss survey"]
+          },
+          "style_notes": "模仿范文语气：先肯定现有贡献，再用转折词引出具体缺陷"
+        }
+      ],
+      "writing_blueprint": {
+        "section_flow": "一句话描述全文逻辑流"
+      }
+    }
+  ]
+}
 `;
 
 // Generic Generator Interface
@@ -259,6 +342,48 @@ export const chatWithMethodologySupervisor = async (history: ChatMessage[], thes
   }
 };
 
+// --- Advanced Mode: Skeleton Planning (Upgraded) ---
+export const generateSkeletonPlan = async (
+    thesisTitle: string,
+    chapterInfo: Chapter,
+    discussionHistory: ChatMessage[] | undefined,
+    referenceTemplate: string | undefined,
+    userInstructions: string | undefined,
+    settings: ApiSettings
+): Promise<SkeletonResponse> => {
+    const systemPrompt = LOGIC_SKELETON_PROMPT;
+    
+    // Format Discussion Context
+    const contextStr = discussionHistory 
+        ? discussionHistory.map(m => `${m.role === 'user' ? 'Student' : 'Advisor'}: ${m.content}`).join('\n').slice(-4000)
+        : "无核心探讨记录";
+
+    const userPromptPayload = {
+        thesis_meta: { title: thesisTitle },
+        current_section: { id: chapterInfo.id, title: chapterInfo.title },
+        // CRITICAL: Injecting context
+        core_discussion_context: contextStr,
+        reference_template: referenceTemplate || "无参考范文，请根据标准学术逻辑推演。",
+        user_instructions: userInstructions || "无特殊指令",
+        available_search_apis: [{ name: "manual_search", capabilities: { can_search_abstracts: true }}]
+    };
+
+    const userPrompt = JSON.stringify(userPromptPayload);
+
+    try {
+        const text = await generateContentUnified(settings, {
+            systemPrompt,
+            userPrompt,
+            jsonMode: true
+        });
+        const parsed = JSON.parse(cleanJsonText(text));
+        return parsed;
+    } catch (e) {
+        console.error("Skeleton Generation Failed", e);
+        throw e;
+    }
+};
+
 // --- Single Section Writer ---
 
 export interface WriteSectionContext {
@@ -270,61 +395,82 @@ export interface WriteSectionContext {
   globalRefs: Reference[];
   settings: ApiSettings;
   discussionHistory?: ChatMessage[]; // New: discussion context
+  fullChapterTree?: Chapter[]; // New: Full outline context for Smart Write
 }
 
 export const writeSingleSection = async (ctx: WriteSectionContext) => {
-  const { thesisTitle, chapterLevel1, targetSection, userInstructions, settings, discussionHistory } = ctx;
+  const { thesisTitle, chapterLevel1, targetSection, userInstructions, settings, discussionHistory, fullChapterTree, globalRefs } = ctx;
 
   const isLevel1 = targetSection.level === 1;
 
-  // Compile discussion context
+  // Compile discussion context (Limited to the relevant chapter usually)
   let discussionContextStr = "";
   if (discussionHistory && discussionHistory.length > 0) {
       discussionContextStr = discussionHistory
         .filter(m => m.role === 'assistant') 
         .map(m => `导师/审稿人意见: ${m.content}`)
-        .join("\n").slice(-2000); 
+        .join("\n").slice(-3000); 
   }
+  
+  // Format Structure Context (Simplified Tree)
+  const structureContext = fullChapterTree 
+      ? JSON.stringify(fullChapterTree.map(c => ({ 
+          title: c.title, 
+          subsections: c.subsections?.map(s => s.title) 
+        })), null, 2)
+      : "（无完整目录信息）";
+
+  // Format Global References for Reuse
+  const globalRefStr = globalRefs.map(r => `[RefID: ${r.id}] ${r.description}`).join("\n");
 
   const systemPrompt = `
     ${HUMAN_WRITING_STYLE}
     
     【写作任务背景】
     题目：${thesisTitle}
-    所属一级章节：${chapterLevel1.title}
-    当前撰写标题：${targetSection.title} (Level ${targetSection.level})
-    ${isLevel1 ? "注意：这是章首语，请概括本章主要内容。" : "注意：请专注于本小节的具体技术/理论细节。"}
+    当前一级章节：${chapterLevel1.title}
+    **当前撰写目标**：${targetSection.title} (Level ${targetSection.level})
+    
+    【全文结构上下文】
+    (请参考此结构以明确当前章节在全文中的定位，避免内容跑题或重复)
+    ${structureContext}
 
-    【核心探讨上下文】
+    【核心探讨上下文 (Critical Logic Source)】
+    以下是作者之前与导师确认过的本章核心思路（方法/数据/实验），请务必将其融入正文：
     ${discussionContextStr}
     
-    【用户指令】
-    ${userInstructions ? userInstructions : "无"}
+    【全局参考文献库 (Global References)】
+    这是项目中已经存在的文献列表。
+    **复用规则**：如果你需要引用的文献在下表中已经存在（**严格同源**），请务必直接使用其 ID 占位符 \`[[REF:ID]]\` (例如 [[REF:12]])。
+    **新增规则**：只有当文献不在下表中时，才使用 \`[[REF:详细文献标题/描述]]\` 来请求添加新文献。
+    
+    已存在列表:
+    ${globalRefStr || "(暂无全局文献，请创建新引用)"}
+    
+    【指令与逻辑骨架（非常重要）】
+    ${userInstructions ? userInstructions : "无特殊指令，请按照标准学术规范撰写。"}
 
     【专业术语与翻译名词规范 (CRITICAL)】
     1. **严格区分“专业术语”与“普通翻译名词”**：
        - **专业术语** (具有行业公认英文缩写): 首次出现必须使用“中文全称 (英文全称, 英文缩写)”格式。
-         * 例如：“生成对抗网络 (Generative Adversarial Networks, GAN)”、“卷积神经网络 (Convolutional Neural Networks, CNN)”。
-         * 后续直接使用缩写 (如 "GAN", "CNN")。
+         * 例如：“生成对抗网络 (Generative Adversarial Networks, GAN)”。
+         * 后续直接使用缩写 (如 "GAN")。
        - **普通翻译名词** (无特定缩写): 直接使用中文，**禁止**强行编造缩写或附带英文。
-         * 例如：“生成器”直接写“生成器”，**不要**写“生成器 (Generator, G)”或“生成器 (Generator)”。
+         * 例如：“生成器”直接写“生成器”，**不要**写“生成器 (Generator, G)”。
          * 例如：“损失函数”直接写“损失函数”，**不要**写“损失函数 (Loss Function)”。
-         * 例如：“编码器”、“注意力机制”、“鲁棒性”等均直接使用中文。
     2. 确保缩写在当前章节内的上下文一致性。
-    3. 如果没有最简写的行业标准缩写，它就不是专业术语，请直接使用中文名称。
 
     【格式占位符规范】
     1. **只输出正文**，不要输出章节标题。
-    2. **特殊对象占位符** (解析器将自动将其转换为复杂的Word格式):
-       - 插入图片：[[FIG:图片描述]]  (例如: [[FIG:U-Net网络结构图]])
+    2. **特殊对象占位符**:
+       - 插入图片：[[FIG:图片描述]]
        - 插入表格：[[TBL:表格描述]]
        - **独立公式（带编号）**：[[EQ:公式内容]] (例如: [[EQ:E=mc^2]])
        - **行内数学符号（无编号）**：[[SYM:数学符号]]
          * 必须嵌入在句子中间，**禁止**在 [[SYM:...]] 前后加换行符！
          * 使用标准 LaTeX 格式。
-       - 插入引用：[[REF:描述或关键词]]
+       - 插入引用：[[REF:描述或关键词]] 或 [[REF:数字ID]]
          * **禁止**在 [[REF:...]] 前后加换行符！
-         * 示例: "根据文献 [[REF:ResNet]] 的方法..."
     3. **段落**：普通文本段落之间用换行符分隔。不要使用 XML/HTML 标签。
 
     请开始撰写：
@@ -360,7 +506,7 @@ interface PostProcessResult {
 // Helper: Flatten chapters to find order
 const flattenChapters = (chapters: Chapter[]): Chapter[] => {
     let list: Chapter[] = [];
-    chapters.forEach(c => {
+    chapters.forEach(c => { // Fixed Syntax Error Here
         list.push(c);
         if (c.subsections) list = list.concat(flattenChapters(c.subsections));
     });
@@ -543,8 +689,9 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
 
 
    // --- PHASE 4: Reference & Formatting (Legacy Logic) ---
-   const finalRefOrder: Reference[] = [];
-   let nextId = 1;
+   // Maintain the global reference list. Only add new ones if they don't match existing descriptions.
+   const finalRefOrder: Reference[] = [...globalReferences];
+   let nextId = finalRefOrder.length > 0 ? Math.max(...finalRefOrder.map(r => r.id)) + 1 : 1;
 
    const processBlock = (content: string): string => {
        if (!content) return "";
@@ -564,20 +711,37 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
            return s;
        }).join('');
        
-       // Ref Indexing
-       // Replaces placeholder [[REF:desc]] with [[REF:1]] (new structure) instead of plain [1]
+       // Ref Indexing Logic (Enhanced for Global Reuse)
+       // Supports [[REF:12]] (Reuse ID) and [[REF:Title...]] (New)
        return txt.replace(/(\[\[REF:(.*?)\]\]|\[(\d+)\])/g, (match, pFull, pDesc, pId) => {
+            
+            // Case A: AI provided an explicit ID (e.g., [[REF:12]])
+            // This happens when AI reused a global reference as instructed.
+            if (pDesc && /^\d+$/.test(pDesc.trim())) {
+                return `[[REF:${pDesc.trim()}]]`; // Trust the ID (assuming AI checked the list)
+            }
+
+            // Case B: AI provided a description/title (e.g., [[REF:Attention is all you need...]])
             let description = "";
             if (pDesc) description = pDesc.trim();
             else if (pId) {
-                const oldRef = globalReferences.find(r => r.id === parseInt(pId));
-                if (oldRef) description = oldRef.description;
-                else return match;
+                // If it looks like [1], it's ambiguous. Try to find if we have it.
+                // But usually AI outputs [[REF:...]] as instructed.
+                // Fallback: Just return match or treat as description "1".
+                // Better: treat pId as description to be searched (unlikely to match but safe)
+                description = pId; 
             }
+            
             if (!description) return match;
 
+            // Strict/Fuzzy Match against Global List
             let assignedId = 0;
-            const existingIdx = finalRefOrder.findIndex(r => r.description === description || r.description.includes(description) || description.includes(r.description));
+            
+            // Check matching. Logic: New description contains Old title OR Old description contains New title
+            // This handles partial matches like "Attention is all you need" matching "Attention is all you need. NIPS 2017..."
+            const existingIdx = finalRefOrder.findIndex(r => 
+                r.description.includes(description) || description.includes(r.description)
+            );
             
             if (existingIdx !== -1) {
                 assignedId = finalRefOrder[existingIdx].id;
@@ -585,14 +749,13 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
                 assignedId = nextId++;
                 finalRefOrder.push({ id: assignedId, description, placeholder: match });
             }
-            // IMPORTANT CHANGE: Return [[REF:ID]] so XML parser detects it as a reference, not plain text.
+            
             return `[[REF:${assignedId}]]`;
        });
    };
 
    // Critical: We must run this over ALL chapters to re-index correctly
-   // because inserting a reference in Chapter 1 shifts IDs in Chapter 2
-   if (onLog) onLog("正在全书重排参考文献顺序...");
+   if (onLog) onLog("正在全书重排参考文献顺序 (优先复用全局同源文献)...");
    
    const finalUpdateRecursive = (list: Chapter[]): Chapter[] => {
        return list.map(ch => {

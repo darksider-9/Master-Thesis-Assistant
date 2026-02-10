@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Step, FormatRules, ThesisStructure, Chapter, Reference, ProjectState, ApiSettings, UsageStats, AgentLog, TokenUsage } from './types';
+import { Step, FormatRules, ThesisStructure, Chapter, Reference, ProjectState, ApiSettings, UsageStats, AgentLog, TokenUsage, SearchHistoryItem } from './types';
 import { parseWordXML, generateThesisXML } from './services/xmlParser';
 import Sidebar from './components/Sidebar';
 import FormatAnalyzer from './components/FormatAnalyzer';
@@ -35,6 +35,7 @@ const App: React.FC = () => {
   // Global Persistence State
   const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
   const [usageStats, setUsageStats] = useState<UsageStats>(INITIAL_USAGE);
+  const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>([]); // New: Search History
 
   // API Settings State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -173,7 +174,7 @@ const App: React.FC = () => {
   // --- Project Persistence ---
   const handleSaveProject = () => {
     const state: ProjectState = {
-      version: "1.1",
+      version: "1.2", // Bump version for search history support
       timestamp: Date.now(),
       step: currentStep,
       thesis,
@@ -185,7 +186,8 @@ const App: React.FC = () => {
           modelName: apiSettings.modelName
       },
       agentLogs,
-      usageStats
+      usageStats,
+      searchHistory // Save history
     };
     const json = JSON.stringify(state, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
@@ -213,6 +215,7 @@ const App: React.FC = () => {
         if (state.step) setCurrentStep(state.step);
         if (state.agentLogs) setAgentLogs(state.agentLogs);
         if (state.usageStats) setUsageStats(state.usageStats);
+        if (state.searchHistory) setSearchHistory(state.searchHistory); // Restore history
         
         // Restore API Settings if they exist in the file
         if (state.apiSettings) {
@@ -317,6 +320,8 @@ const App: React.FC = () => {
               apiSettings={settingsWithCallback}
               agentLogs={agentLogs}
               addLog={addAgentLog}
+              searchHistory={searchHistory}
+              setSearchHistory={setSearchHistory}
             />
           )}
 

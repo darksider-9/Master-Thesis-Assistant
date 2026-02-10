@@ -134,7 +134,7 @@ export interface InterviewData {
 
 export interface AgentLog {
   id: string;
-  agentName: 'Supervisor' | 'Methodologist' | 'Writer' | 'Reviewer' | 'TermChecker' | 'Reference' | 'Fixer';
+  agentName: 'Supervisor' | 'Methodologist' | 'Writer' | 'Reviewer' | 'TermChecker' | 'Reference' | 'Fixer' | 'Planner' | 'Searcher';
   message: string;
   timestamp: number;
   status: 'processing' | 'success' | 'warning' | 'error';
@@ -167,6 +167,32 @@ export interface ApiSettings {
     onUsage?: (usage: TokenUsage) => void;
 }
 
+// --- Search & History Types ---
+
+export type SearchProvider = 'none' | 'semantic_scholar' | 'arxiv' | 'open_alex' | 'crossref' | 'serper';
+export type CitationStyle = 'GB/T 7714' | 'APA' | 'IEEE' | 'MLA';
+
+export interface SearchResult {
+    id: string;
+    title: string;
+    abstract: string;
+    authors: string[];
+    year: string;
+    url?: string;
+    source: string;
+    venue?: string; // Journal or Conference name
+    doi?: string;
+}
+
+export interface SearchHistoryItem {
+    id: string;
+    timestamp: number;
+    query: string;
+    provider: SearchProvider;
+    results: SearchResult[];
+    blockId?: string; // Which block initiated this
+}
+
 export interface ProjectState {
   version: string;
   timestamp: number;
@@ -177,6 +203,7 @@ export interface ProjectState {
   apiSettings?: Omit<ApiSettings, 'onUsage'>;
   agentLogs: AgentLog[];
   usageStats: UsageStats;
+  searchHistory: SearchHistoryItem[]; // New: Persist search history
 }
 
 // --- Style Configuration Types ---
@@ -207,4 +234,43 @@ export interface StyleSettings {
   reference: StyleConfig;
   equationSeparator?: '-' | '.';
   header: HeaderConfig; // New Header Config
+}
+
+// --- Advanced Mode: Skeleton & Planning Types ---
+
+export interface SkeletonBlock {
+  block_id: string;
+  move: string;
+  slots: {
+    Claim: string;
+    Evidence: string[];
+    Mechanism?: string;
+    KeywordsZH?: string[];
+    KeywordsEN?: string[];
+  };
+  style_notes?: string;
+}
+
+export interface SearchQueryInfo {
+  block_id: string;
+  query_sets: {
+    broad_query?: string[];
+    focused_query?: string[];
+  };
+}
+
+export interface SectionPlan {
+  section_id: string;
+  section_title: string;
+  skeleton_blocks: SkeletonBlock[];
+  search_plan: {
+    per_block_queries: SearchQueryInfo[];
+  };
+  writing_blueprint?: {
+    section_flow: string;
+  };
+}
+
+export interface SkeletonResponse {
+  section_plans: SectionPlan[];
 }
