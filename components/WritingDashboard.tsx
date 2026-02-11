@@ -1,9 +1,9 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { ThesisStructure, Chapter, FormatRules, Reference, AgentLog, ApiSettings, SectionPlan, SearchProvider, SearchResult, SearchHistoryItem, CitationStyle } from '../types';
-import { writeSingleSection, runPostProcessingAgents, generateSkeletonPlan } from '../services/geminiService';
+import { ThesisStructure, Chapter, FormatRules, Reference, AgentLog, ApiSettings, SectionPlan, SearchProvider, SearchResult, SearchHistoryItem, CitationStyle, SkeletonBlock } from '../types';
+import { writeSingleSection, runPostProcessingAgents, generateSkeletonPlan, polishDraftContent, finalizeAcademicStyle } from '../services/geminiService';
 import { searchAcademicPapers } from '../services/searchService';
-import { generateContextEntry } from '../utils/citationFormatter';
+import { generateContextEntry, formatCitation } from '../utils/citationFormatter';
 import SearchHistoryModal from './SearchHistoryModal';
 
 interface WritingDashboardProps {
@@ -25,20 +25,27 @@ interface FlattenedNode {
   parentId: string | null;
   depth: number;
   label: string; 
+  chapterIndex: number; // Added to track which L1 chapter this belongs to
 }
 
-const flattenChapters = (chapters: Chapter[], parentLabel: string = "", depth: number = 0): FlattenedNode[] => {
+// Updated Flatten to track Chapter Index
+const flattenChapters = (chapters: Chapter[], parentLabel: string = "", depth: number = 0, rootIndex: number = 0): FlattenedNode[] => {
   let nodes: FlattenedNode[] = [];
   chapters.forEach((ch, idx) => {
+    // If depth is 0, this IS the root chapter, so its index is idx + 1
+    // If depth > 0, we inherit the rootIndex passed down
+    const currentRootIndex = depth === 0 ? idx + 1 : rootIndex;
+    
     const currentLabel = parentLabel ? `${parentLabel}.${idx + 1}` : `${idx + 1}`;
     nodes.push({
       chapter: ch,
       parentId: null,
       depth,
-      label: currentLabel
+      label: currentLabel,
+      chapterIndex: currentRootIndex
     });
     if (ch.subsections) {
-      nodes = [...nodes, ...flattenChapters(ch.subsections, currentLabel, depth + 1)];
+      nodes = [...nodes, ...flattenChapters(ch.subsections, currentLabel, depth + 1, currentRootIndex)];
     }
   });
   return nodes;
@@ -53,6 +60,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
   // User Inputs
   const [instructions, setInstructions] = useState<Record<string, string>>({}); 
   const [refTemplates, setRefTemplates] = useState<Record<string, string>>({}); 
+  const [targetWordCounts, setTargetWordCounts] = useState<Record<string, number>>({}); // node_id -> word count constraint
   
   const logsEndRef = useRef<HTMLDivElement>(null);
   
@@ -77,7 +85,10 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
   const [globalTerms, setGlobalTerms] = useState<any[]>([]);
 
   const selectedChapter = thesis.chapters.find(c => c.id === selectedChapterId);
-  const nodes = selectedChapter ? flattenChapters([selectedChapter], `${thesis.chapters.indexOf(selectedChapter) + 1}`) : [];
+  // Calculate index of selected chapter in the whole thesis for numbering
+  const selectedChapterIndex = thesis.chapters.findIndex(c => c.id === selectedChapterId) + 1;
+  
+  const nodes = selectedChapter ? flattenChapters([selectedChapter], `${selectedChapterIndex}`, 0, selectedChapterIndex) : [];
   
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -140,13 +151,27 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
   const addCitationToContext = (blockId: string, result: SearchResult) => {
       const existingText = referenceInputs[blockId] || "";
       
-      // Check if strictly homologous (same source title) in global references
-      const existingRef = references.find(r => 
+      // 1. Check if strictly homologous (same source title) in global references
+      let existingRef = references.find(r => 
         r.description.includes(result.title) || result.title.includes(r.description)
       );
 
-      // Use the utility to generate a formatted string
-      const citationEntry = generateContextEntry(result, citationStyle, existingRef?.id);
+      // 2. IMPORTANT: If not found, immediately register it in global references with CORRECT FORMAT
+      // This fixes the issue where only the name was inserted.
+      if (!existingRef) {
+          const formattedDesc = formatCitation(result, citationStyle);
+          const newId = references.length > 0 ? Math.max(...references.map(r => r.id)) + 1 : 1;
+          const newRef: Reference = {
+              id: newId,
+              description: formattedDesc // Store the full formatted string
+          };
+          setReferences(prev => [...prev, newRef]);
+          existingRef = newRef;
+          addLog('Reference', `已将文献 [${newId}] "${result.title}" 存入全局参考文献库 (${citationStyle})`, 'success');
+      }
+
+      // 3. Update the Context Textbox with the entry (showing ID for reuse)
+      const citationEntry = generateContextEntry(result, citationStyle, existingRef.id);
 
       setReferenceInputs(prev => ({
           ...prev,
@@ -171,8 +196,21 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
          );
 
          if (response.section_plans && response.section_plans.length > 0) {
-             setPlans(prev => ({ ...prev, [nodeId]: response.section_plans[0] }));
-             addLog('Planner', `✅ 骨架提取成功，生成 ${response.section_plans[0].skeleton_blocks.length} 个逻辑块`, 'success');
+             // Prefix Block IDs with Chapter ID to prevent scope pollution/collision
+             const plan = response.section_plans[0];
+             const uniqueBlocks = plan.skeleton_blocks.map((b, idx) => ({
+                 ...b,
+                 block_id: `${nodeId}_blk_${idx + 1}`
+             }));
+             
+             // Reset reference inputs for this new set of blocks (optional, but cleaner)
+             // setReferenceInputs(prev => { ...clean up old ones? No, keep history for now ... });
+
+             setPlans(prev => ({ 
+                 ...prev, 
+                 [nodeId]: { ...plan, skeleton_blocks: uniqueBlocks } 
+             }));
+             addLog('Planner', `✅ 骨架提取成功，生成 ${uniqueBlocks.length} 个逻辑块`, 'success');
          } else {
              throw new Error("API 返回了空计划");
          }
@@ -182,6 +220,45 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
      } finally {
          setLoadingNodes(prev => ({ ...prev, [nodeId]: false }));
      }
+  };
+
+  const handleUpdateBlockSlot = (nodeId: string, blockIndex: number, field: string, value: string) => {
+      setPlans(prev => {
+          const plan = prev[nodeId];
+          if (!plan) return prev;
+          const newBlocks = [...plan.skeleton_blocks];
+          newBlocks[blockIndex] = {
+              ...newBlocks[blockIndex],
+              slots: {
+                  ...newBlocks[blockIndex].slots,
+                  [field]: value
+              }
+          };
+          return { ...prev, [nodeId]: { ...plan, skeleton_blocks: newBlocks } };
+      });
+  };
+
+  const handleDeleteBlock = (nodeId: string, blockIndex: number) => {
+      setPlans(prev => {
+          const plan = prev[nodeId];
+          if (!plan) return prev;
+          const newBlocks = plan.skeleton_blocks.filter((_, i) => i !== blockIndex);
+          return { ...prev, [nodeId]: { ...plan, skeleton_blocks: newBlocks } };
+      });
+  };
+
+  const handleAddBlock = (nodeId: string) => {
+      setPlans(prev => {
+          const plan = prev[nodeId];
+          if (!plan) return prev;
+          const newBlock: SkeletonBlock = {
+              block_id: `${nodeId}_manual_${Date.now()}`,
+              move: "Manual-Addition",
+              slots: { Claim: "新论点...", Evidence: [], KeywordsZH: [], KeywordsEN: [] },
+              style_notes: "自定义"
+          };
+          return { ...prev, [nodeId]: { ...plan, skeleton_blocks: [...plan.skeleton_blocks, newBlock] } };
+      });
   };
 
   const handleWriteWithPlan = async (node: FlattenedNode) => {
@@ -195,7 +272,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       if (!plan) return;
 
       setLoadingNodes(prev => ({ ...prev, [nodeId]: true }));
-      addLog('Writer', `正在基于骨架撰写: ${node.label}...`, 'processing');
+      addLog('Writer', `Step 1/3: 正在基于骨架撰写: ${node.label}...`, 'processing');
 
       let constructedInstruction = `【严格遵循以下逻辑骨架进行撰写】\n\n写作蓝图: ${plan.writing_blueprint?.section_flow || "按顺序撰写"}\n\n`;
       
@@ -218,6 +295,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       }
 
       try {
+          // STEP 1: Draft
           let content = await writeSingleSection({
             thesisTitle: thesis.title,
             chapterLevel1: selectedChapter,
@@ -227,8 +305,18 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
             globalRefs: references,
             settings: apiSettings,
             discussionHistory: selectedChapter.chatHistory, 
-            fullChapterTree: thesis.chapters 
+            fullChapterTree: thesis.chapters,
+            targetWordCount: targetWordCounts[nodeId] || 800,
+            chapterIndex: node.chapterIndex // Pass index for numbering
           });
+
+          // STEP 2: Logic Polish (With real-time numbering)
+          addLog('Fixer', `Step 2/3: 逻辑润色与图表编号渲染...`, 'processing');
+          content = await polishDraftContent(content, node.chapterIndex, apiSettings);
+
+          // STEP 3: Style Finalize
+          addLog('Writer', `Step 3/3: 最终去AI味与格式定稿...`, 'processing');
+          content = await finalizeAcademicStyle(content, node.chapterIndex, apiSettings);
 
           content = content
             .replace(/\n\s*(\[\[(?:SYM|REF):)/g, ' $1')
@@ -239,7 +327,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
             chapters: updateNodeContent(prev.chapters, nodeId, content)
           }));
 
-          addLog('Writer', `✅ ${node.label} 拼装撰写完成`, 'success');
+          addLog('Writer', `✅ ${node.label} 全流程撰写完成 (自动编号已渲染)`, 'success');
 
       } catch (e) {
           addLog('Writer', `❌ ${node.label} 撰写失败: ${e}`, 'warning');
@@ -258,11 +346,12 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
     
     const nodeId = node.chapter.id;
     setLoadingNodes(prev => ({ ...prev, [nodeId]: true }));
-    addLog('Writer', `正在撰写: ${node.label} ${node.chapter.title}...`, 'processing');
+    addLog('Writer', `Step 1/3: 正在撰写: ${node.label} ${node.chapter.title}...`, 'processing');
 
     try {
       const userInstruction = instructions[nodeId] || "";
       
+      // STEP 1: Draft
       let content = await writeSingleSection({
         thesisTitle: thesis.title,
         chapterLevel1: selectedChapter,
@@ -272,8 +361,18 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
         globalRefs: references,
         settings: apiSettings,
         discussionHistory: selectedChapter.chatHistory, 
-        fullChapterTree: thesis.chapters 
+        fullChapterTree: thesis.chapters,
+        targetWordCount: targetWordCounts[nodeId] || 800,
+        chapterIndex: node.chapterIndex // Pass index for numbering
       });
+
+      // STEP 2: Logic Polish
+      addLog('Fixer', `Step 2/3: 逻辑润色与图表编号渲染...`, 'processing');
+      content = await polishDraftContent(content, node.chapterIndex, apiSettings);
+
+      // STEP 3: Style Finalize
+      addLog('Writer', `Step 3/3: 最终去AI味与格式定稿...`, 'processing');
+      content = await finalizeAcademicStyle(content, node.chapterIndex, apiSettings);
 
       content = content
         .replace(/\n\s*(\[\[(?:SYM|REF):)/g, ' $1')
@@ -284,7 +383,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
         chapters: updateNodeContent(prev.chapters, nodeId, content)
       }));
 
-      addLog('Writer', `✅ ${node.label} 撰写完成`, 'success');
+      addLog('Writer', `✅ ${node.label} 撰写完成 (自动编号已渲染)`, 'success');
 
     } catch (e) {
       addLog('Writer', `❌ ${node.label} 失败: ${e}`, 'warning');
@@ -346,7 +445,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
      return paragraphs.map((paragraph, i) => {
          const trimmed = paragraph.trim();
          if (trimmed.startsWith("[[FIG:")) {
-             const desc = trimmed.replace("[[FIG:", "").replace("]]", "");
+             // Clean up ID attribute if present for display
+             const desc = trimmed.replace("[[FIG:", "").replace("]]", "").split('|')[0];
              return (
                <div key={i} className="my-2 p-3 bg-blue-50 border border-blue-100 rounded text-center shadow-sm">
                   <div className="w-20 h-20 bg-blue-100 mx-auto mb-2 flex items-center justify-center text-blue-400 rounded">IMG</div>
@@ -355,7 +455,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
              );
          }
          if (trimmed.startsWith("[[TBL:")) {
-             const desc = trimmed.replace("[[TBL:", "").replace("]]", "");
+             const desc = trimmed.replace("[[TBL:", "").replace("]]", "").split('|')[0];
              return (
                <div key={i} className="my-2 p-3 bg-green-50 border border-green-100 rounded text-center shadow-sm">
                   <div className="text-xs font-bold text-green-600 mb-1">表 [自动编号]: {desc}</div>
@@ -551,7 +651,19 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                   {hasContent && <span className="text-xs bg-green-100 text-green-600 px-2 py-0.5 rounded-full font-bold">已生成</span>}
                                </div>
                                
-                               <div className="flex gap-2">
+                               <div className="flex gap-2 items-center">
+                                  {/* Word Count Target Input */}
+                                  <div className="flex items-center bg-slate-100 rounded px-2 py-1 mr-2 border border-slate-200">
+                                      <span className="text-[10px] text-slate-500 mr-1 font-bold">目标字数:</span>
+                                      <input 
+                                          type="number"
+                                          className="w-12 text-xs bg-transparent border-none outline-none text-center font-mono text-blue-600"
+                                          placeholder="800"
+                                          defaultValue={800}
+                                          onChange={(e) => setTargetWordCounts(prev => ({...prev, [node.chapter.id]: parseInt(e.target.value) || 800}))}
+                                      />
+                                  </div>
+
                                   {advancedMode ? (
                                       !plan ? (
                                         <button 
@@ -587,9 +699,12 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                             {/* Advanced Mode: Skeleton View */}
                             {advancedMode && plan && (
                                 <div className="p-4 bg-purple-50/30 border-b border-purple-100">
-                                    <div className="mb-2 text-xs font-bold text-purple-800 flex justify-between">
+                                    <div className="mb-2 text-xs font-bold text-purple-800 flex justify-between items-center">
                                         <span>逻辑蓝图: {plan.writing_blueprint?.section_flow}</span>
-                                        <button onClick={() => setPlans(prev => { const n = {...prev}; delete n[node.chapter.id]; return n; })} className="text-purple-400 underline">重置</button>
+                                        <div className="flex gap-2">
+                                            <button onClick={() => handleAddBlock(node.chapter.id)} className="text-[10px] bg-purple-100 px-2 py-0.5 rounded text-purple-700 hover:bg-purple-200">+ 添加块</button>
+                                            <button onClick={() => setPlans(prev => { const n = {...prev}; delete n[node.chapter.id]; return n; })} className="text-purple-400 underline text-[10px]">重置骨架</button>
+                                        </div>
                                     </div>
                                     <div className="space-y-3">
                                         {plan.skeleton_blocks.map((block, idx) => {
@@ -600,12 +715,29 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                             const activeSearchText = activeSearchQueries[block.block_id] || "";
                                             
                                             return (
-                                                <div key={idx} className="bg-white border border-purple-100 p-3 rounded-lg shadow-sm">
-                                                    <div className="flex justify-between items-start mb-1">
-                                                        <span className="text-xs font-bold text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded">{block.move}</span>
-                                                        <span className="text-[10px] text-slate-400 font-mono">Block {idx + 1}</span>
+                                                <div key={block.block_id} className="bg-white border border-purple-100 p-3 rounded-lg shadow-sm">
+                                                    <div className="flex justify-between items-start mb-2">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-xs font-bold text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded">{block.move}</span>
+                                                            <span className="text-[10px] text-slate-400 font-mono">Block {idx + 1}</span>
+                                                        </div>
+                                                        <button 
+                                                            onClick={() => handleDeleteBlock(node.chapter.id, idx)}
+                                                            className="text-slate-300 hover:text-red-500 text-xs"
+                                                            title="删除此块"
+                                                        >
+                                                            🗑️
+                                                        </button>
                                                     </div>
-                                                    <p className="text-xs text-slate-700 mb-2 font-bold">{block.slots.Claim}</p>
+                                                    
+                                                    {/* Editable Claim */}
+                                                    <textarea 
+                                                        className="w-full text-xs font-bold text-slate-700 mb-2 border-b border-transparent focus:border-purple-300 outline-none resize-none bg-transparent"
+                                                        rows={2}
+                                                        value={block.slots.Claim}
+                                                        onChange={(e) => handleUpdateBlockSlot(node.chapter.id, idx, 'Claim', e.target.value)}
+                                                        placeholder="在此输入核心主张..."
+                                                    />
                                                     
                                                     {/* Evidence / Search Section */}
                                                     {hasKeywords && (

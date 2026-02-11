@@ -384,7 +384,81 @@ export const generateSkeletonPlan = async (
     }
 };
 
-// --- Single Section Writer ---
+// --- NEW AGENT 1: Logic & Flow Polishing Agent ---
+export const polishDraftContent = async (
+    rawText: string,
+    chapterIndex: number, // Pass index for context
+    settings: ApiSettings
+): Promise<string> => {
+    const systemPrompt = `
+    你是一名“学术论文逻辑润色专家”。你的任务是优化一段AI生成的初稿，使其逻辑更连贯、内容更充实，并修复格式问题。
+
+    【核心任务 1：增强逻辑衔接 (Fix Logic Gaps)】
+    - **诊断生硬转折**：如果发现文章“讲完A概念，毫无过渡直接讲B概念”，必须在中间插入合适的过渡句。
+    - **补充上下文**：如果某段落像“孤岛”一样存在，请增加一句话将其与本章核心目标（${chapterIndex}章）联系起来。
+
+    【核心任务 2：严格图表清洗 (Strict Format Cleaning)】
+    - **剔除伪编号**：AI初稿中常出现“如图1所示”、“见表2-1”等硬编码文字。**必须全部删除**，或替换为标准占位符。
+    - **保留完整定义符**：确保图片/表格定义符完整保留，格式为 \`[[FIG:描述]]\` 或 \`[[TBL:描述]]\`。
+    - **统一引用符**：
+      - 将文中所有的“如图xx所示”修改为：\`如图 [[REF_FIG:描述]] 所示\`。
+      - **绝对禁止**保留 "图 1"、"Figure 2" 这种纯文本编号。
+
+    【核心任务 3：内容充实】
+    - 如果某小节字数过少（<100字），请根据上下文自动扩写，增加理论解释或应用场景描述。
+
+    【约束】
+    - **不改变原意**：保留原文的核心论点、数据和参考文献引用。
+    - **不改变引用ID**：绝对不要修改 \`[[REF:ID]]\` 中的 ID 数字。
+    
+    请直接输出优化后的正文：
+    `;
+
+    try {
+        const text = await generateContentUnified(settings, {
+            systemPrompt,
+            userPrompt: `【待润色初稿】\n${rawText}`,
+            jsonMode: false
+        });
+        // Note: We deliberately DO NOT call renderPlaceholderNumbers here anymore.
+        // We keep the raw tags [[FIG:...]] so that the Global Post-Processing agent can number them consecutively.
+        return cleanMarkdownArtifacts(text);
+    } catch (e) {
+        console.warn("Polishing failed, returning raw text", e);
+        return rawText;
+    }
+};
+
+// --- NEW AGENT 2: Final Human Style & Format Check ---
+export const finalizeAcademicStyle = async (
+    text: string,
+    chapterIndex: number,
+    settings: ApiSettings
+): Promise<string> => {
+    const systemPrompt = `
+    ${HUMAN_WRITING_STYLE}
+
+    这是文章生成的最后一个环节（Final Check）。你的任务是进行最后的“去AI味”和“格式标准化”。
+    
+    1. **再次检查语气**：确保没有“总而言之”、“综上所述”、“我们发现”等词汇。强制转换为客观被动语态。
+    2. **检查符号规范**：确保行内公式使用 \`[[SYM:...]]\` 且不换行。独立公式使用 \`[[EQ:...]]\`。
+    3. **最终输出**：直接输出最终成文。
+    `;
+    
+    try {
+        const res = await generateContentUnified(settings, {
+            systemPrompt,
+            userPrompt: `【待定稿文本】\n${text}`,
+            jsonMode: false
+        });
+        // Note: We deliberately DO NOT call renderPlaceholderNumbers here.
+        return cleanMarkdownArtifacts(res);
+    } catch (e) {
+        return text;
+    }
+};
+
+// --- Single Section Writer (Updated Prompt) ---
 
 export interface WriteSectionContext {
   thesisTitle: string;
@@ -396,10 +470,12 @@ export interface WriteSectionContext {
   settings: ApiSettings;
   discussionHistory?: ChatMessage[]; // New: discussion context
   fullChapterTree?: Chapter[]; // New: Full outline context for Smart Write
+  targetWordCount?: number; // New: Constraint for word count
+  chapterIndex: number; // New: For numbering
 }
 
 export const writeSingleSection = async (ctx: WriteSectionContext) => {
-  const { thesisTitle, chapterLevel1, targetSection, userInstructions, settings, discussionHistory, fullChapterTree, globalRefs } = ctx;
+  const { thesisTitle, chapterLevel1, targetSection, userInstructions, settings, discussionHistory, fullChapterTree, globalRefs, targetWordCount, chapterIndex } = ctx;
 
   const isLevel1 = targetSection.level === 1;
 
@@ -423,14 +499,20 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
   // Format Global References for Reuse
   const globalRefStr = globalRefs.map(r => `[RefID: ${r.id}] ${r.description}`).join("\n");
 
+  const wordCountInstruction = targetWordCount 
+      ? `【重要字数要求】本节内容的生成长度**必须**至少达到 ${targetWordCount} 字。请务必深入展开每一个逻辑点，提供详尽的分析、推导或描述，严禁简略带过。`
+      : "";
+
   const systemPrompt = `
     ${HUMAN_WRITING_STYLE}
     
     【写作任务背景】
     题目：${thesisTitle}
-    当前一级章节：${chapterLevel1.title}
+    当前一级章节：${chapterLevel1.title} (这是全书第 ${chapterIndex} 章)
     **当前撰写目标**：${targetSection.title} (Level ${targetSection.level})
     
+    ${wordCountInstruction}
+
     【全文结构上下文】
     (请参考此结构以明确当前章节在全文中的定位，避免内容跑题或重复)
     ${structureContext}
@@ -439,14 +521,26 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
     以下是作者之前与导师确认过的本章核心思路（方法/数据/实验），请务必将其融入正文：
     ${discussionContextStr}
     
-    【全局参考文献库 (Global References)】
-    这是项目中已经存在的文献列表。
-    **复用规则**：如果你需要引用的文献在下表中已经存在（**严格同源**），请务必直接使用其 ID 占位符 \`[[REF:ID]]\` (例如 [[REF:12]])。
-    **新增规则**：只有当文献不在下表中时，才使用 \`[[REF:详细文献标题/描述]]\` 来请求添加新文献。
-    
+    【全局参考文献库 (Global References) - 严格引用规则】
     已存在列表:
     ${globalRefStr || "(暂无全局文献，请创建新引用)"}
+
+    **⚠️ 严禁滥用引用 ID (Strict Granularity Rule)**：
+    只有当【已存文献】与你当前想引用的内容在**概念层级**上完全一致时，才允许复用 ID。
     
+    **举例说明（必须遵守）**：
+    - **场景 1 (U-Net)**: 
+      - 如果文中提到 "使用 U-Net 进行分割"，且全局库中有 *Ronneberger et al. U-Net...*，则**必须**复用该 ID。
+      - 如果全局库中只有一本通用的《深度学习》教材，**绝对禁止**引用它来佐证 "U-Net" 的具体细节，必须新建引用 [[REF:Ronneberger U-Net...]]。
+      - 如果文中提到 "Attention U-Net"，**绝对禁止**引用原始 U-Net 的 ID，必须新建 "Attention U-Net" 的引用。
+    - **场景 2 (L1/L2 Loss)**:
+      - 如果 L1 Loss 和 L2 Loss 的定义出自同一篇综述文章，且该文章已在库中，则两者可以共用同一个 ID。
+      - 如果文中讨论的是 "Focal Loss"，而库中只有 "Cross Entropy Loss" 的文献，**禁止**复用，必须新建。
+    
+    **操作指令**:
+    1. **复用**: 只有确认颗粒度匹配时，使用 \`[[REF:ID]]\` (如 [[REF:12]])。
+    2. **新增**: 如果库中没有匹配层级的文献，使用 \`[[REF:详细文献标题/描述]]\`。
+
     【指令与逻辑骨架（非常重要）】
     ${userInstructions ? userInstructions : "无特殊指令，请按照标准学术规范撰写。"}
 
@@ -462,15 +556,11 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
 
     【格式占位符规范】
     1. **只输出正文**，不要输出章节标题。
-    2. **特殊对象占位符**:
-       - 插入图片：[[FIG:图片描述]]
-       - 插入表格：[[TBL:表格描述]]
-       - **独立公式（带编号）**：[[EQ:公式内容]] (例如: [[EQ:E=mc^2]])
-       - **行内数学符号（无编号）**：[[SYM:数学符号]]
-         * 必须嵌入在句子中间，**禁止**在 [[SYM:...]] 前后加换行符！
-         * 使用标准 LaTeX 格式。
-       - 插入引用：[[REF:描述或关键词]] 或 [[REF:数字ID]]
-         * **禁止**在 [[REF:...]] 前后加换行符！
+    2. **图表占位与引用 (Real-time Sync Rendering)**:
+       - 插入图片：使用 \`[[FIG:描述]]\`。例如 \`[[FIG:U-Net网络结构]]\`。
+       - 引用图片：使用 \`[[REF_FIG:描述]]\`。例如 \`如图 [[REF_FIG:U-Net网络结构]] 所示\`。
+       - 插入表格：\`[[TBL:描述]]\`。
+       - 引用表格：\`见表 [[REF_TBL:描述]]\`。
     3. **段落**：普通文本段落之间用换行符分隔。不要使用 XML/HTML 标签。
 
     请开始撰写：
@@ -478,17 +568,18 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
 
   try {
     const text = await generateContentUnified(settings, { systemPrompt, userPrompt: "请开始撰写本小节内容", jsonMode: false });
+    // Note: We allow raw tags here as well.
     return cleanMarkdownArtifacts(text);
   } catch (e) {
     throw new Error(`撰写失败: ${e instanceof Error ? e.message : '未知错误'}`);
   }
 };
 
-// --- COMPLEX POST-PROCESSING WITH AI AGENTS ---
+// --- COMPLEX POST-PROCESSING WITH AI AGENTS (RESTORED) ---
 
 interface PostProcessContext {
-    fullText: string; // Deprecated in favor of allChapters structure
-    chapterId: string; // The chapter we are processing
+    fullText: string; 
+    chapterId: string;
     allChapters: Chapter[];
     globalReferences: Reference[];
     globalTerms: TechnicalTerm[];
@@ -506,7 +597,7 @@ interface PostProcessResult {
 // Helper: Flatten chapters to find order
 const flattenChapters = (chapters: Chapter[]): Chapter[] => {
     let list: Chapter[] = [];
-    chapters.forEach(c => { // Fixed Syntax Error Here
+    chapters.forEach(c => {
         list.push(c);
         if (c.subsections) list = list.concat(flattenChapters(c.subsections));
     });
@@ -545,7 +636,7 @@ const extractTermsAI = async (text: string, settings: ApiSettings): Promise<Tech
     }
 };
 
-// 2. Rewrite Agent
+// 2. Rewrite Agent (RESTORED)
 const rewriteContentAI = async (text: string, instructions: string, settings: ApiSettings): Promise<string> => {
     const systemPrompt = `
       ${HUMAN_WRITING_STYLE}
@@ -582,8 +673,113 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
    const flatAll = flattenChapters(updatedChapters);
    
    // Identify the subset of nodes belonging to the CURRENT chapter
-   // We need to process these for extraction and potentially rewriting
    const currentChapterNodes = flatAll.filter((c: Chapter) => c.id.startsWith(chapterId) || c.id === chapterId);
+   
+   // Calculate Chapter Index (Simple Heuristic: count L1 chapters before this one)
+   const allL1 = flatAll.filter(c => c.level === 1);
+   const currentL1Index = allL1.findIndex(c => c.id === chapterId) + 1; // 1-based index
+
+   // --- PHASE 0: GLOBAL FIGURE/TABLE NUMBERING (Inject Logic Here) ---
+   if (onLog) onLog(`Phase 0: 正在执行全章图表/公式统一编号 (Chapter ${currentL1Index})...`);
+   
+   let figCount = 0;
+   let tblCount = 0;
+   
+   const figsMap = new Map<string, { index: number, raw: string }>();
+   const tblsMap = new Map<string, { index: number, raw: string }>();
+   
+   currentChapterNodes.forEach(node => {
+       if (!node.content) return;
+       
+       // Scan Figures
+       const figRegex = /\[\[FIG:(.*?)\]\]/g;
+       let match;
+       while ((match = figRegex.exec(node.content)) !== null) {
+           figCount++;
+           const content = match[1];
+           const idMatch = content.match(/\|id=([^|\]]+)/);
+           // Fallback to using content as ID if |id= is missing (User requested simplified prompts)
+           const id = idMatch ? idMatch[1].trim() : content.trim();
+           
+           if (id) {
+               figsMap.set(id, { index: figCount, raw: content });
+           }
+       }
+       
+       // Scan Tables
+       const tblRegex = /\[\[TBL:(.*?)\]\]/g;
+       while ((match = tblRegex.exec(node.content)) !== null) {
+           tblCount++;
+           const content = match[1];
+           const idMatch = content.match(/\|id=([^|\]]+)/);
+           const id = idMatch ? idMatch[1].trim() : content.trim();
+           
+           if (id) {
+               tblsMap.set(id, { index: tblCount, raw: content });
+           }
+       }
+   });
+
+   // Pass 2: Replacement (Rendering)
+   let replaceFigCount = 0;
+   let replaceTblCount = 0;
+   
+   currentChapterNodes.forEach(node => {
+       if (!node.content) return;
+       let text = node.content;
+
+       // 1. Replace Definitions [[FIG:...]] -> 图 X-Y
+       // We only add markers here, actual numbering is dynamic or by XML parser
+       // But to ensure consistency, we leave the Definition tag alone (it renders via XML)
+       // We mainly care about the REF tags below.
+       
+       // 2. Replace References [[REF_FIG:id]] -> 图 X-Y
+       text = text.replace(/\[\[REF_FIG(?::(.*?))?\]\]/g, (_, keyword) => {
+           if (!keyword) return "图 [?]";
+           const kw = keyword.trim();
+           
+           // Try exact match first
+           let entry = figsMap.get(kw);
+           
+           // If not found, try fuzzy search (if kw is part of desc or desc is part of kw)
+           if (!entry) {
+               for (const [key, val] of figsMap.entries()) {
+                   if (key.includes(kw) || kw.includes(key)) {
+                       entry = val;
+                       break;
+                   }
+               }
+           }
+           
+           if (entry) {
+               return `图 ${currentL1Index}-${entry.index}`;
+           }
+           return `图 [Ref Error: ${kw}]`;
+       });
+
+       text = text.replace(/\[\[REF_TBL(?::(.*?))?\]\]/g, (_, keyword) => {
+           if (!keyword) return "表 [?]";
+           const kw = keyword.trim();
+           let entry = tblsMap.get(kw);
+           
+           if (!entry) {
+                for (const [key, val] of tblsMap.entries()) {
+                   if (key.includes(kw) || kw.includes(key)) {
+                       entry = val;
+                       break;
+                   }
+               }
+           }
+           
+           if (entry) {
+               return `表 ${currentL1Index}-${entry.index}`;
+           }
+           return `表 [Ref Error: ${kw}]`;
+       });
+       
+       node.content = text;
+   });
+   
    
    // --- PHASE 1: AI TERM EXTRACTION (Current Chapter Only) ---
    if (onLog) onLog(`正在扫描本章 ${currentChapterNodes.length} 个节点的专业术语...`);
@@ -606,12 +802,6 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
    if (onLog) onLog("构建全书术语索引，计算首次出现位置...");
 
    // We need to know if these terms appear in EARLIER chapters (Pre-order).
-   // Since we don't extract AI terms from previous chapters every time (too slow),
-   // we do a hybrid approach: 
-   // 1. We assume we have a 'registry' of known terms (ctx.globalTerms is the accumulation).
-   // 2. But to be safe for "out of order writing", we perform a lightweight string check 
-   //    on ALL preceding chapters for the terms we just found.
-   
    const termDirectives: Record<string, 'use_full' | 'use_short'> = {}; // Key: NodeID + Acronym
    const uniqueAcronyms = Array.from(new Set(localTermsFound.map(x => x.term.acronym.toUpperCase())));
 
@@ -621,14 +811,11 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
        if (!termObj) return;
 
        // Find the very first node in the ENTIRE book that mentions this acronym OR its full name
-       // We use a simple includes check for speed on the global scope
        let firstGlobalNodeId = "";
        
        for (const node of flatAll) {
            if (!node.content) continue;
            const contentUpper = node.content.toUpperCase();
-           // Strict check: Acronym should be bounded or in parens to avoid partial matches
-           // But for simplicity in this logic, we check if the concept exists
            if (contentUpper.includes(acronym) || (termObj.fullName && node.content.includes(termObj.fullName))) {
                firstGlobalNodeId = node.id;
                break; // Found the first one
@@ -638,7 +825,6 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
        // Now decide for the CURRENT chapter nodes
        currentChapterNodes.forEach((node: Chapter) => {
            if (!node.content) return;
-           // Does this node contain the term?
            const hasTerm = node.content.toUpperCase().includes(acronym) || node.content.includes(termObj.fullName);
            if (hasTerm) {
                const key = `${node.id}||${acronym}`;
@@ -677,7 +863,6 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
        });
 
        if (nodeDirectives.length > 0) {
-           // Call AI to rewrite this specific section
            if (onLog) onLog(`  - 修正节点: ${node.title} ...`);
            const newContent = await rewriteContentAI(node.content, nodeDirectives.join("\n"), settings);
            node.content = newContent; // Update in place
@@ -716,29 +901,19 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
        return txt.replace(/(\[\[REF:(.*?)\]\]|\[(\d+)\])/g, (match, pFull, pDesc, pId) => {
             
             // Case A: AI provided an explicit ID (e.g., [[REF:12]])
-            // This happens when AI reused a global reference as instructed.
             if (pDesc && /^\d+$/.test(pDesc.trim())) {
                 return `[[REF:${pDesc.trim()}]]`; // Trust the ID (assuming AI checked the list)
             }
 
-            // Case B: AI provided a description/title (e.g., [[REF:Attention is all you need...]])
+            // Case B: AI provided a description/title
             let description = "";
             if (pDesc) description = pDesc.trim();
-            else if (pId) {
-                // If it looks like [1], it's ambiguous. Try to find if we have it.
-                // But usually AI outputs [[REF:...]] as instructed.
-                // Fallback: Just return match or treat as description "1".
-                // Better: treat pId as description to be searched (unlikely to match but safe)
-                description = pId; 
-            }
+            else if (pId) description = pId; 
             
             if (!description) return match;
 
             // Strict/Fuzzy Match against Global List
             let assignedId = 0;
-            
-            // Check matching. Logic: New description contains Old title OR Old description contains New title
-            // This handles partial matches like "Attention is all you need" matching "Attention is all you need. NIPS 2017..."
             const existingIdx = finalRefOrder.findIndex(r => 
                 r.description.includes(description) || description.includes(r.description)
             );

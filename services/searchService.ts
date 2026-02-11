@@ -21,7 +21,8 @@ const fetchWithTimeout = async (url: string, options: RequestInit = {}) => {
 const searchSemanticScholar = async (query: string, apiKey?: string): Promise<SearchResult[]> => {
     // S2 Graph API (Free tier has limits, Key recommended for high volume)
     // We request abstract, title, year, authors
-    const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(query)}&limit=5&fields=title,abstract,authors,year,url,venue`;
+    // Added 'tldr' which is sometimes better than abstract for quick scanning, but we prefer abstract.
+    const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(query)}&limit=5&fields=title,abstract,authors,year,url,venue,publicationDate`;
     
     const headers: HeadersInit = {};
     if (apiKey) {
@@ -37,9 +38,10 @@ const searchSemanticScholar = async (query: string, apiKey?: string): Promise<Se
     return data.data.map((item: any) => ({
         id: item.paperId,
         title: item.title,
-        abstract: item.abstract || "（暂无摘要）",
+        // Fallback logic for abstract
+        abstract: item.abstract ? item.abstract.replace(/\n/g, " ").trim() : "（Semantic Scholar 未提供该文摘要，可能是因为版权限制）",
         authors: item.authors?.map((a: any) => a.name) || [],
-        year: item.year?.toString() || "N/A",
+        year: item.year?.toString() || item.publicationDate?.substring(0,4) || "N/A",
         url: item.url,
         source: 'Semantic Scholar'
     }));
@@ -73,10 +75,15 @@ const searchArxiv = async (query: string): Promise<SearchResult[]> => {
             authors.push(authorNodes[j].getElementsByTagName("name")[0]?.textContent || "");
         }
 
+        // CRITICAL FIX: ArXiv summaries have newlines that look like truncation in some UIs.
+        // Replace newlines with spaces.
+        const cleanSummary = summary.replace(/\s+/g, " ").trim();
+        const cleanTitle = title.replace(/\s+/g, " ").trim();
+
         results.push({
             id: id,
-            title: title.replace(/\s+/g, " ").trim(),
-            abstract: summary.replace(/\s+/g, " ").trim(),
+            title: cleanTitle,
+            abstract: cleanSummary || "（无摘要）",
             authors: authors,
             year: published.substring(0, 4), // YYYY-MM-DD
             url: id,
@@ -136,7 +143,7 @@ const searchCrossref = async (query: string): Promise<SearchResult[]> => {
     return data.message.items.map((item: any) => ({
         id: item.DOI,
         title: item.title?.[0] || "Untitled",
-        abstract: item.abstract ? item.abstract.replace(/<[^>]+>/g, '') : "（Crossref 未提供摘要，建议仅作为引用元数据）",
+        abstract: item.abstract ? item.abstract.replace(/<[^>]+>/g, '') : "（Crossref API 通常只提供元数据，不提供完整摘要，建议尝试 OpenAlex）",
         authors: item.author?.map((a: any) => `${a.given} ${a.family}`) || [],
         year: item.published?.['date-parts']?.[0]?.[0]?.toString() || "N/A",
         url: item.URL,
@@ -171,7 +178,7 @@ const searchSerper = async (query: string, apiKey: string): Promise<SearchResult
     return (data.organic || []).map((item: any) => ({
         id: item.link || item.position,
         title: item.title,
-        abstract: item.snippet || "（Google Scholar 未抓取到摘要片段）",
+        abstract: item.snippet || "（Google Scholar 只提供片段 Snippet，非完整摘要）",
         authors: [], // Serper doesn't strictly parse authors in 'organic' sometimes, contained in snippet
         year: item.year || "N/A",
         url: item.link,
