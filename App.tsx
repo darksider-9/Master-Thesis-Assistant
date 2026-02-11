@@ -183,7 +183,10 @@ const App: React.FC = () => {
       apiSettings: {
           apiKey: apiSettings.apiKey,
           baseUrl: apiSettings.baseUrl,
-          modelName: apiSettings.modelName
+          modelName: apiSettings.modelName,
+          // NEW: Persist Search Settings
+          searchApiKey: apiSettings.searchApiKey,
+          searchProvider: apiSettings.searchProvider
       },
       agentLogs,
       usageStats,
@@ -318,6 +321,7 @@ const App: React.FC = () => {
               references={references}
               setReferences={setReferences}
               apiSettings={settingsWithCallback}
+              setApiSettings={setApiSettings} // Pass setter for search key persistence
               agentLogs={agentLogs}
               addLog={addAgentLog}
               searchHistory={searchHistory}

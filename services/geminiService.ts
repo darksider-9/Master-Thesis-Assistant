@@ -1,6 +1,6 @@
 
 import { GoogleGenAI } from "@google/genai";
-import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings, ThesisStructure, SkeletonResponse } from "../types";
+import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings, ThesisStructure, SkeletonResponse, SearchResult } from "../types";
 
 // --- OpenAI Compatible Interface ---
 
@@ -11,19 +11,32 @@ const cleanJsonText = (text: string) => {
 
 const cleanMarkdownArtifacts = (text: string) => {
   if (!text) return "";
-  return text
-    // Remove bold markers **text** -> text
-    .replace(/\*\*(.*?)\*\*/g, '$1') 
-    // Remove italic markers *text* -> text
-    .replace(/(^|[^\*])\*([^\*]+)\*(?!\*)/g, '$1$2')     
-    // Remove list bullets at start of line (* Item -> Item)
-    .replace(/^\s*[\*\-]\s+/gm, '')
-    // Remove markdown headers
-    .replace(/^#+\s+/gm, '')         
-    // Remove backticks
-    .replace(/`/g, '')
-    // Remove underscores
-    .replace(/__+/g, '');              
+
+  // Strategy: Split text by Formula/Symbol tags to protect them from cleaning.
+  // We use capturing group () to keep the separators (the tags themselves) in the result array.
+  const parts = text.split(/(\[\[(?:EQ|SYM):[\s\S]*?\]\])/g);
+
+  return parts.map(part => {
+      // 1. If it is a Formula or Symbol block, return exactly as is (Preserve * # etc.)
+      if (part.startsWith('[[EQ:') || part.startsWith('[[SYM:')) {
+          return part;
+      }
+
+      // 2. If it is normal text, apply Markdown cleaning
+      return part
+        // Remove bold markers **text** -> text
+        .replace(/\*\*(.*?)\*\*/g, '$1') 
+        // Remove italic markers *text* -> text (Be careful not to kill single * used in math if outside EQ tags, but typically math is in EQ)
+        .replace(/(^|[^\*])\*([^\*]+)\*(?!\*)/g, '$1$2')     
+        // Remove list bullets at start of line (* Item -> Item)
+        .replace(/^\s*[\*\-]\s+/gm, '')
+        // Remove markdown headers (# Header -> Header) - Prevent AI from making sub-titles visible
+        .replace(/^#+\s+/gm, '')         
+        // Remove backticks
+        .replace(/`/g, '')
+        // Remove underscores
+        .replace(/__+/g, '');
+  }).join('');              
 };
 
 // --- CONSTANTS: Human-like Writing Style Guide (Refined for Strict Academic Tone) ---
@@ -40,15 +53,16 @@ const HUMAN_WRITING_STYLE = `
    - "首先...其次...最后..."（除非是描述严谨的算法步骤序列，否则请用逻辑递进或空间结构代替）。
 
 【强制执行的写作规范】
-1. **零连接词逻辑（Implicit Cohesion）**：
+1. **标点符号规范 (Strict Chinese Punctuation)**：
+   - **全角优先**：正文中必须严格使用中文全角标点字符，包括：逗号（，）、句号（。）、括号（（））、冒号（：）、分号（；）。
+   - **严禁**：在正文中出现英文半角逗号(,)或英文括号()，除非是在公式内部、代码片段或参考文献引用编号中。
+2. **零连接词逻辑（Implicit Cohesion）**：
    - 高水平的学术写作依靠句与句之间的逻辑内在联系（因果、转折、递进）来衔接，而不是靠“因此”、“但是”这些显性词。
    - *Bad*: "首先使用了A方法，然后因为A方法效果不好，所以使用了B方法。"
    - *Good*: "鉴于A方法在处理稀疏数据时收敛困难，本文引入B策略以增强特征提取的鲁棒性。"
-2. **客观被动语态**：
+3. **客观被动语态**：
    - 多用“本文提出”、“实验结果表明”、“数据分析显示”。
    - 少用或不用“我们发现”、“我想”。
-3. **句式密度与信息量**：
-   - 避免短句碎读。学术长句应包含：条件状语（在xx条件下） + 核心主张（xx表现出xx特性） + 数据/理论支撑（误差降低了xx%）。
 4. **具体化**：
    - 凡是涉及评价，必须带上限定条件。不要说“效果很好”，要说“在低信噪比环境下，Dice系数提升了3.5%”。
 
@@ -67,15 +81,27 @@ const LOGIC_SKELETON_PROMPT = `
 
 ========================
 0) 总原则与约束（必须遵守）
+- **位置感知 (Context Awareness)**：
+  - 在设计骨架前，必须先明确：**这一小节在整章、整篇论文中处于什么位置？起什么作用？**
+  - 如果是方法的“前奏”，则需“抛砖引玉”；如果是“核心”，则需“严丝合缝”地推导。
+  - **逻辑架构设计**：你必须设计出**层层递进、环环相扣**的逻辑链条。上一段的结尾必须是下一段的伏笔，或者这一段是下一段的理论支撑。
+- **积木化构建**：
+  - 必须严格使用下方的【通用逻辑词 (Moves)】作为**积木**来搭建骨架，确保学术规范性。不要自己创造奇怪的逻辑类型。
 - 不编造：不得凭空编造文献、实验结果。
 - 模板可学结构不可抄句：若提供 参考范文，只能学习其段落推进/语气/对比框架，禁止复用原句。
-- **关键词策略 (重要)**：
-  - **脉络延展性**：生成的关键词组必须覆盖该段落的逻辑演进。例如，如果段落是从“通用综述”讲到“具体缺陷”，关键词应包含宽泛的综述词和具体的缺陷词。
-  - **中英双语 (Bilingual)**：必须同时提供中文和英文关键词（各占50%），以支持在不同数据库（ArXiv/OpenAlex vs 知网/万方）中检索。
-  - **具体化**：严禁生成“深度学习”这种泛泛的词，必须是“基于Transformer的医学分割 (Transformer-based medical segmentation)”这种级别。
+- **关键词策略 (关键 - 离散组合搜索)**：
+  - **核心逻辑**：搜索关键词不是连续的自然语言句子，而是**由“大方向 + 小方向 + 具体技术”组成的离散词组**。这是为了模拟最可能同时出现在目标论文标题/摘要中的高频词组合。
+  - **组合公式 (2-3个词)**：
+    1. **词1 (大背景/对象)**：如 "CT", "MRI", "医学图像", "肺结节"。
+    2. **词2 (核心任务)**：如 "配准", "分割", "生成", "重建", "合成"。
+    3. **词3 (细分技术/限定 - 可选)**：如 "刚性", "非刚性", "GAN", "Transformer", "跨模态"。
+  - **示例**：
+    - 目标：找医学影像跨模态生成文献。 -> 关键词：**"CT MRI 生成 GAN"** (而非 "基于GAN的CT到MRI图像生成")
+    - 目标：找刚性配准文献。 -> 关键词：**"CT 配准 刚性"**
+  - **数量要求**：每个 Block 必须严格提供 **2组中文组合** 和 **2组英文组合**。
 
 ========================
-A) 通用“逻辑词”词表（跨章节可复用）
+A) 通用“逻辑词”词表（即你的“积木库”，跨章节可复用）
 Level-1：Move（段落功能/修辞动作）
 Level-2：Slots（信息槽：段落里必须填的内容类型）
 
@@ -106,8 +132,8 @@ A2. Level-2 Slots（所有 Move 统一使用）
 - Claim：这一段要表达的主张（1句）
 - Evidence：需要的证据类型（reference/data/formula/figure/table/comparison）
 - Mechanism：为什么成立（原理/推导/直觉）
-- KeywordsZH：中文检索词（3-5个，覆盖从宽泛到具体的脉络）
-- KeywordsEN：英文检索词（3-5个，对应英文术语，方便ArXiv/OpenAlex检索）
+- KeywordsZH：中文检索词（2组，每组2-3个离散词拼凑）
+- KeywordsEN：英文检索词（2组，每组2-3个离散词拼凑）
 
 ========================
 C) 你的输出：严格 JSON
@@ -122,8 +148,8 @@ C) 你的输出：严格 JSON
           "slots": {
             "Claim": "本段核心主张 (e.g., 现有U-Net在处理边缘细节时存在模糊问题)",
             "Evidence": ["reference|data|formula|figure|table|comparison"],
-            "KeywordsZH": ["U-Net 边缘模糊 原因", "医学图像分割 边界损失函数 综述"], 
-            "KeywordsEN": ["U-Net boundary fuzziness analysis", "medical segmentation boundary loss survey"]
+            "KeywordsZH": ["CT 配准 刚性", "医学图像 配准 综述"], 
+            "KeywordsEN": ["CT registration rigid", "medical image registration survey"]
           },
           "style_notes": "模仿范文语气：先肯定现有贡献，再用转折词引出具体缺陷"
         }
@@ -384,6 +410,58 @@ export const generateSkeletonPlan = async (
     }
 };
 
+// --- NEW AGENT: Search Result Filter & Selector ---
+// This agent acts as the "Judge" to select the best papers from API results.
+export const filterSearchResultsAI = async (
+    topicClaim: string,
+    searchResults: SearchResult[],
+    settings: ApiSettings
+): Promise<string[]> => { // Returns array of ID strings to select
+    const candidatesStr = searchResults.map(r => 
+        `[ID: ${r.id}] Title: ${r.title}\n   Year: ${r.year}\n   Abstract: ${r.abstract.slice(0, 300)}...`
+    ).join("\n\n");
+
+    const systemPrompt = `
+    你是一名极其严格的文献筛选专家。你的任务是从搜索结果中为论文的特定段落挑选最合适的参考文献。
+
+    【当前段落主题/论点 (Claim)】
+    "${topicClaim}"
+
+    【筛选原则 (优先级从高到低)】
+    1. **相关性 (Relevance) - 压倒性原则**:
+       - 候选文献必须严格匹配当前段落的具体技术方向。
+       - **举例**: 如果段落讲 "CT图像的跨模态生成(Synthesis)"，而候选文献是 "CT图像去噪(Denoising)"，即使都是"CT生成"大类，也必须**剔除**。去噪不是合成。
+       - **举例**: 如果段落讲 "刚性配准"，剔除纯粹的 "非刚性/形变配准" 文献，除非是综述。
+    2. **时效性 (Recency)**:
+       - 优先选择 **2020年及以后** 的文献。
+       - 次选 **2015-2019年** 的文献。
+       - **特例**: 如果某篇 2015 年前的文章是该领域公认的开山之作（如 U-Net 2015, ResNet 2016），且相关性极高，可以保留。
+       - **权衡**: 如果有一篇 2023 年的文章但相关性一般，和一篇 2018 年的文章且相关性完美，选 2018 年的。**相关性 > 时效性**。
+    3. **如果没有合适的**:
+       - 如果所有候选文献都不符合上述严格要求，请返回空列表。不要凑数。
+
+    【输出格式】
+    请返回一个 JSON 对象，包含一个 "selectedIds" 数组，列出选中文献的 ID (字符串)。
+    {
+      "selectedIds": ["id1", "id2"] 
+    }
+    `;
+
+    try {
+        const text = await generateContentUnified(settings, {
+            systemPrompt,
+            userPrompt: `【候选文献列表】\n${candidatesStr}`,
+            jsonMode: true
+        });
+        const parsed = JSON.parse(cleanJsonText(text));
+        return parsed.selectedIds || [];
+    } catch (e) {
+        console.error("Filter Search Results Failed", e);
+        return [];
+    }
+};
+
+
 // --- NEW AGENT 1: Logic & Flow Polishing Agent ---
 export const polishDraftContent = async (
     rawText: string,
@@ -393,9 +471,18 @@ export const polishDraftContent = async (
     const systemPrompt = `
     你是一名“学术论文逻辑润色专家”。你的任务是优化一段AI生成的初稿，使其逻辑更连贯、内容更充实，并修复格式问题。
 
-    【核心任务 1：增强逻辑衔接 (Fix Logic Gaps)】
-    - **诊断生硬转折**：如果发现文章“讲完A概念，毫无过渡直接讲B概念”，必须在中间插入合适的过渡句。
-    - **补充上下文**：如果某段落像“孤岛”一样存在，请增加一句话将其与本章核心目标（${chapterIndex}章）联系起来。
+    【核心任务 1：深度逻辑重构 (Deep Logic Refinement - 仿照高水平范文)】
+    请模仿高质量中文核心期刊的“分类-缺陷-改进”逻辑链条对文本进行重写，参考范式如下：
+    1. **"总-分-演进"宏观结构**：
+       - 必须先宏观综述（如“现阶段主要分为A类、B类...”），再分段深入。
+       - 严禁碎片化罗列，必须建立分类体系。
+    2. **辩证论述闭环**：
+       - 在介绍具体方法时，必须遵循【定义/原理 -> 优势分析 -> 固有缺陷 -> 改进策略】的完整闭环。
+       - *Example*: "中值滤波（定义）因计算简单被广泛采用（优势）。然而，其在处理复杂纹理时易导致细节丢失（缺陷）。为此，学者引入了加权融合策略（改进）..."
+    3. **强逻辑衔接（显性连接词）**：
+       - 句与句之间严禁断裂。必须熟练使用“然而”、“为此”、“此外”、“鉴于此”、“其中”、“具体而言”等词强行串联上下文。
+       - *Bad*: "A方法很好。B方法也不错。"
+       - *Good*: "尽管A方法表现优异，但其计算复杂度过高，因此B方法作为一种轻量化替代方案被提出。"
 
     【核心任务 2：严格图表清洗 (Strict Format Cleaning)】
     - **剔除伪编号**：AI初稿中常出现“如图1所示”、“见表2-1”等硬编码文字。**必须全部删除**，或替换为标准占位符。
@@ -404,12 +491,19 @@ export const polishDraftContent = async (
       - 将文中所有的“如图xx所示”修改为：\`如图 [[REF_FIG:描述]] 所示\`。
       - **绝对禁止**保留 "图 1"、"Figure 2" 这种纯文本编号。
 
-    【核心任务 3：内容充实】
+    【核心任务 3：多重引用分离 (Multiple Citations)】
+    - **禁止合并**：如果原稿中有连续引用 (如 [1, 2] 或 [1][2])，**必须**将其拆分为独立的引用标签。
+    - *Incorrect*: \`[[REF:1, 2]]\` 或 \`[[REF:1-3]]\`
+    - *Correct*: \`[[REF:1]][[REF:2]]\`
+    - 这样是为了后续能够精确索引每一个独立的文献。
+
+    【核心任务 4：内容充实】
     - 如果某小节字数过少（<100字），请根据上下文自动扩写，增加理论解释或应用场景描述。
 
     【约束】
     - **不改变原意**：保留原文的核心论点、数据和参考文献引用。
     - **不改变引用ID**：绝对不要修改 \`[[REF:ID]]\` 中的 ID 数字。
+    - **严禁英文标点**：确保输出的正文使用中文全角标点（，。），公式内除外。
     
     请直接输出优化后的正文：
     `;
@@ -442,7 +536,8 @@ export const finalizeAcademicStyle = async (
     
     1. **再次检查语气**：确保没有“总而言之”、“综上所述”、“我们发现”等词汇。强制转换为客观被动语态。
     2. **检查符号规范**：确保行内公式使用 \`[[SYM:...]]\` 且不换行。独立公式使用 \`[[EQ:...]]\`。
-    3. **最终输出**：直接输出最终成文。
+    3. **标点强制检查**：正文必须是中文全角标点。
+    4. **最终输出**：直接输出最终成文。
     `;
     
     try {
@@ -517,6 +612,11 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
     (请参考此结构以明确当前章节在全文中的定位，避免内容跑题或重复)
     ${structureContext}
 
+    【结构约束 (Structure Constraints)】
+    1. **扁平化输出**：你当前的任务是撰写 "${targetSection.title}" 这一具体小节的内容。
+    2. **严禁嵌套标题**：请直接输出正文段落，**绝对禁止**在回复中自己生成下一级的小标题（例如：不要在 2.1 节里自己编造 2.1.1 标题）。保持平铺直叙。
+    3. **只写正文**：不要重复打印当前章节的标题。
+
     【核心探讨上下文 (Critical Logic Source)】
     以下是作者之前与导师确认过的本章核心思路（方法/数据/实验），请务必将其融入正文：
     ${discussionContextStr}
@@ -540,6 +640,7 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
     **操作指令**:
     1. **复用**: 只有确认颗粒度匹配时，使用 \`[[REF:ID]]\` (如 [[REF:12]])。
     2. **新增**: 如果库中没有匹配层级的文献，使用 \`[[REF:详细文献标题/描述]]\`。
+    3. **多重引用**: 如果需要同时引用多个，请写成 \`[[REF:1]][[REF:2]]\`，**严禁**使用逗号合并如 \`[1,2]\`。
 
     【指令与逻辑骨架（非常重要）】
     ${userInstructions ? userInstructions : "无特殊指令，请按照标准学术规范撰写。"}
@@ -947,6 +1048,53 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
    };
 
    updatedChapters = finalUpdateRecursive(updatedChapters);
+
+   // --- PHASE 5: Reference Metadata Validation & Formatting (Strict GB/T 7714) ---
+   if (onLog) onLog("Phase 5: 正在进行参考文献严格格式校验 (GB/T 7714)...");
+   
+   finalRefOrder.forEach(ref => {
+       if (ref.metadata) {
+           const md = ref.metadata;
+           // Format Authors: "Family, Given" -> "FAMILY G" style roughly or strict GB/T
+           // Simplified GB/T Author Format: First 3 authors + et al.
+           const formatAuthors = (authors: string[]) => {
+               // Assuming authors come as "Family, Given" or "Full Name"
+               const processed = authors.map(a => {
+                   // naive capitalization if needed, or keep as is from Crossref
+                   return a; 
+               });
+               if (processed.length > 3) {
+                   return `${processed.slice(0, 3).join(", ")}等`; // Chinese style et al.
+               }
+               return processed.join(", ");
+           };
+
+           const authorsStr = formatAuthors(md.authors);
+           let finalStr = "";
+           
+           if (md.type === 'journal-article' || md.journal) {
+                // [序号] 作者. 题名[J]. 刊名, 年, 卷(期): 起止页码.
+                finalStr = `${authorsStr}. ${md.title}[J]. ${md.journal}, ${md.year}`;
+                if (md.volume) finalStr += `, ${md.volume}`;
+                if (md.issue) finalStr += `(${md.issue})`;
+                if (md.pages) {
+                    finalStr += `: ${md.pages}.`;
+                } else {
+                    finalStr += `.`;
+                    if (onLog) onLog(`⚠️ 警告: 文献 [${ref.id}] "${md.title.substring(0,20)}..." 缺少页码信息。`);
+                }
+           } else {
+                // Default fallback
+                finalStr = `${authorsStr}. ${md.title}. ${md.year}.`;
+           }
+           
+           // Update description strictly
+           ref.description = finalStr;
+       } else {
+           if (onLog) onLog(`⚠️ 警告: 文献 [${ref.id}] "${ref.description.substring(0,20)}..." 缺少结构化元数据，格式可能不标准。`);
+       }
+   });
+
 
    // Extract new global terms list for UI display
    const finalGlobalTerms = [...ctx.globalTerms];

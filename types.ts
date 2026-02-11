@@ -1,114 +1,21 @@
 
-export interface FormatRules {
-  rawXML: string; // The full pkg:package XML string
-  // Map internal style IDs (e.g., "2", "a5") to logical roles
-  styleIds: {
-    heading1: string;
-    heading2: string;
-    heading3: string;
-    normal: string;
-    caption: string; // Generic caption style
-  };
-  // Metadata for UI
-  metadata: {
-    paperSize?: string;
-    margins?: string;
-  };
-  // Legacy flat structure for UI visualization
-  templateStructure: TemplateBlock[];
-  // New robust mapping for generation
-  mapping?: TemplateMappingJSON;
-  
-  fontMain: string;
-  fontSizeNormal: string;
-}
-
-export type BlockKind = 
-    | 'front_title' | 'toc' | 'toc_item' | 'toc_title' | 'back_title'
-    | 'heading' | 'paragraph'
-    | 'caption_figure' | 'caption_table'
-    | 'equation' | 'image_placeholder'
-    | 'reference_section' | 'reference_item'
-    | 'section' // Legacy support
-    | 'other'
-    | 'table';
-
-export interface TemplateBlock {
-  order: number;
-  // Fix: Added 'other' to support all node types from parser mapping
-  nodeType: 'p' | 'tbl' | 'sectPr' | 'other';
-  type: BlockKind;
-  level: number; // 0 normal, 1-3
-  styleId?: string;
-  text?: string;
-  owner?: { sectionId: string; h1?: string; h2?: string; h3?: string };
-  fields?: string[];
-  bookmarks?: string[];
-}
-
-export type MappingSectionKind = 'front' | 'toc' | 'lot' | 'lof' | 'body' | 'back' | 'root';
-
-export interface MappingSection {
-  id: string;
-  kind: MappingSectionKind;
+export interface ReferenceMetadata {
   title: string;
-  level: number;
-  parentId?: string; // For nested structure if needed
-  startOrder: number;
-  endOrder: number;
-  blocks: string[]; // Block IDs
-}
-
-export interface MappingBlock extends TemplateBlock {
-  id: string;
-}
-
-export interface TemplateMappingJSON {
-  source: string;
-  headingStyleIds: { h1: string; h2: string; h3: string };
-  sections: MappingSection[];
-  blocks: MappingBlock[];
-}
-
-export interface VisualNode {
-  id: string;
-  label: string;
-  type: string;
-  kind?: string;
-  children: VisualNode[];
-  content?: string;
-  isAI?: boolean;
-}
-
-export interface ThesisStructure {
-  title: string;
-  chapters: Chapter[];
-}
-
-export interface Chapter {
-  id: string;
-  title: string;
-  level: number;
-  content?: string;
-  subsections: Chapter[];
-  status: 'pending' | 'discussed' | 'completed';
-  chatHistory?: ChatMessage[];
-  metadata?: {
-      figureCount?: number;
-      tableCount?: number;
-      isCoreChapter?: boolean;
-      methodology?: string;
-      dataSources?: string;
-      experimentalDesign?: string;
-      resultsAnalysis?: string;
-  };
-  designConfirmed?: boolean;
+  authors: string[];
+  journal?: string;
+  year?: string;
+  volume?: string;
+  issue?: string;
+  pages?: string;
+  doi?: string;
+  type?: string; // Relaxed from union to string to allow 'journal-article' etc.
 }
 
 export interface Reference {
   id: number;
   description: string;
   placeholder?: string; // The [[REF:...]] string found in text
+  metadata?: ReferenceMetadata; // New: Structured data for strict formatting
 }
 
 export type Step = 'upload' | 'title' | 'structure' | 'discussion' | 'writing' | 'export';
@@ -163,6 +70,9 @@ export interface ApiSettings {
     apiKey: string;
     baseUrl?: string;
     modelName: string;
+    // New: Persistence for Search Settings
+    searchApiKey?: string;
+    searchProvider?: string;
     // Callback for tracking usage, not saved to JSON
     onUsage?: (usage: TokenUsage) => void;
 }
@@ -191,6 +101,82 @@ export interface SearchHistoryItem {
     provider: SearchProvider;
     results: SearchResult[];
     blockId?: string; // Which block initiated this
+}
+
+// --- Chapter & Thesis Structure Types ---
+
+export interface Chapter {
+  id: string;
+  title: string;
+  level: number;
+  content?: string;
+  subsections?: Chapter[];
+  status?: 'pending' | 'discussed' | 'completed';
+  designConfirmed?: boolean;
+  metadata?: {
+      figureCount?: number;
+      tableCount?: number;
+      isCoreChapter?: boolean;
+      methodology?: string;
+      dataSources?: string;
+      experimentalDesign?: string;
+      resultsAnalysis?: string;
+      figurePlan?: string[];
+      tablePlan?: string[];
+  };
+  chatHistory?: ChatMessage[];
+}
+
+export interface ThesisStructure {
+  title: string;
+  chapters: Chapter[];
+}
+
+// --- Mapping & Parser Types ---
+
+export type BlockKind = 'heading' | 'front_title' | 'back_title' | 'toc_title' | 'image_placeholder' | 'equation' | 'paragraph' | 'caption_figure' | 'caption_table' | 'table' | 'other';
+export type MappingSectionKind = 'front' | 'toc' | 'body' | 'back' | 'root';
+
+export interface MappingBlock {
+  id: string;
+  order: number;
+  nodeType: 'p' | 'tbl' | 'sectPr';
+  type: BlockKind;
+  level: number;
+  styleId?: string;
+  text?: string;
+  owner?: { sectionId: string };
+  fields?: string[];
+  bookmarks?: string[];
+}
+
+export interface TemplateBlock extends MappingBlock {}
+
+export interface MappingSection {
+  id: string;
+  kind: MappingSectionKind;
+  title: string;
+  level: number;
+  startOrder: number;
+  endOrder: number;
+  blocks: string[]; // block ids
+}
+
+export interface TemplateMappingJSON {
+  source: string;
+  headingStyleIds: { h1: string; h2: string; h3: string };
+  sections: MappingSection[];
+  blocks: MappingBlock[];
+}
+
+export interface FormatRules {
+  rawXML: string;
+  styleIds: { heading1: string; heading2: string; heading3: string; normal: string; caption: string };
+  metadata: { paperSize: string };
+  templateStructure: TemplateBlock[];
+  mapping?: TemplateMappingJSON;
+  fontMain: string;
+  fontSizeNormal: string;
 }
 
 export interface ProjectState {
@@ -234,6 +220,18 @@ export interface StyleSettings {
   reference: StyleConfig;
   equationSeparator?: '-' | '.';
   header: HeaderConfig; // New Header Config
+}
+
+// --- Visualizer Types ---
+
+export interface VisualNode {
+  id: string;
+  label: string;
+  type: 'section_l1' | 'section_l2' | 'section_l3' | 'content_block';
+  kind?: string; 
+  children: VisualNode[];
+  content?: string;
+  isAI?: boolean;
 }
 
 // --- Advanced Mode: Skeleton & Planning Types ---

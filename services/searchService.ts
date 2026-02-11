@@ -1,7 +1,7 @@
 
-import { SearchProvider, SearchResult } from "../types";
+import { SearchProvider, SearchResult, ReferenceMetadata } from "../types";
 
-const TIMEOUT_MS = 10000;
+const TIMEOUT_MS = 120000; // Increased to 120 seconds for slow academic APIs
 
 // Helper to fetch with timeout
 const fetchWithTimeout = async (url: string, options: RequestInit = {}) => {
@@ -15,6 +15,39 @@ const fetchWithTimeout = async (url: string, options: RequestInit = {}) => {
     clearTimeout(id);
     throw error;
   }
+};
+
+// --- New: Fetch Detailed Metadata for Strict Formatting ---
+export const fetchDetailedRefMetadata = async (title: string): Promise<ReferenceMetadata | null> => {
+    try {
+        const politeMail = "thesis_assistant_user@example.com";
+        // Search Crossref works by title to get the best match
+        const url = `https://api.crossref.org/works?query.bibliographic=${encodeURIComponent(title)}&rows=1&mailto=${politeMail}`;
+        
+        const res = await fetchWithTimeout(url);
+        if (!res.ok) return null;
+        
+        const data = await res.json();
+        const item = data.message?.items?.[0];
+        
+        if (!item) return null;
+
+        // Map Crossref fields to our metadata structure
+        return {
+            title: item.title?.[0] || title,
+            authors: item.author?.map((a: any) => `${a.family}, ${a.given}`) || [],
+            journal: item['container-title']?.[0] || "",
+            year: item.published?.['date-parts']?.[0]?.[0]?.toString() || "",
+            volume: item.volume || "",
+            issue: item.issue || "",
+            pages: item.page || "",
+            doi: item.DOI || "",
+            type: item.type // 'journal-article', etc.
+        };
+    } catch (e) {
+        console.warn("Crossref metadata fetch failed", e);
+        return null;
+    }
 };
 
 // 1. Semantic Scholar API
@@ -175,15 +208,40 @@ const searchSerper = async (query: string, apiKey: string): Promise<SearchResult
     if (!res.ok) throw new Error(`Serper API Error: ${res.status}`);
     const data = await res.json();
 
-    return (data.organic || []).map((item: any) => ({
-        id: item.link || item.position,
-        title: item.title,
-        abstract: item.snippet || "（Google Scholar 只提供片段 Snippet，非完整摘要）",
-        authors: [], // Serper doesn't strictly parse authors in 'organic' sometimes, contained in snippet
-        year: item.year || "N/A",
-        url: item.link,
-        source: 'Serper (Google Scholar)'
-    }));
+    return (data.organic || []).map((item: any) => {
+        // Serper result fix for year
+        // item.year might be a number or string
+        let year = (item.year || "").toString();
+        
+        // Validation: If year is not a standard 19xx/20xx year, or if we suspect it's part of an arXiv ID.
+        // arXiv IDs often look like YYMM.xxxxx. 1709 = Sep 2017.
+        // If year is "1709", it's suspicious.
+        const isValidYear = /^(19|20)\d{2}$/.test(year);
+        
+        if (!isValidYear) {
+            // Try to extract from snippet or attributes
+            // Serper usually has 'snippet' or sometimes 'publicationInfo' (attributes)
+            // We look for a 4-digit year in the snippet string
+            const textToScan = (item.snippet || "") + " " + (item.publicationInfo || "");
+            const matches = textToScan.match(/\b(19|20)\d{2}\b/g);
+            if (matches && matches.length > 0) {
+                // Take the last one as it's often the publication year at the end of citation
+                year = matches[matches.length - 1]; 
+            } else {
+                year = "N/A";
+            }
+        }
+
+        return {
+            id: item.link || item.position,
+            title: item.title,
+            abstract: item.snippet || "（Google Scholar 只提供片段 Snippet，非完整摘要）",
+            authors: [], // Serper doesn't strictly parse authors in 'organic' sometimes, contained in snippet
+            year: year,
+            url: item.link,
+            source: 'Serper (Google Scholar)'
+        };
+    });
 };
 
 // Unified Switcher

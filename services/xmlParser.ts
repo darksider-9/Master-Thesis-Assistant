@@ -1350,6 +1350,7 @@ export const parseWordXML = (xmlString: string): FormatRules => {
     const body = getChildByTagNameNS(docRoot!, NS.w, "body");
     const mapping = extractMapping(body!, headingStyles, "template.xml");
      const templateStructure: TemplateBlock[] = mapping.blocks.map(b => ({
+        id: b.id,
         order: b.order, nodeType: b.nodeType, type: b.type, level: b.level, styleId: b.styleId,
         text: normalizeTitle(b.text || ""), owner: b.owner, fields: b.fields, bookmarks: b.bookmarks
       }));
