@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { Step, FormatRules, ThesisStructure, Chapter, Reference, ProjectState, ApiSettings, UsageStats, AgentLog, TokenUsage, SearchHistoryItem } from './types';
 import { parseWordXML, generateThesisXML } from './services/xmlParser';
+import { analyzeImportedStructure, reverseEngineerMetadata } from './services/geminiService'; // Import new services
 import Sidebar from './components/Sidebar';
 import FormatAnalyzer from './components/FormatAnalyzer';
 import StructurePlanner from './components/StructurePlanner';
@@ -123,6 +124,91 @@ const App: React.FC = () => {
       alert("解析 XML 失败，请检查文件格式。");
       console.error(e);
     }
+  };
+
+  // --- NEW: Handle Smart Import ---
+  const handleThesisImport = async (extractedChapters: Chapter[], rawTextPreview: string) => {
+      if (!apiSettings.apiKey) {
+          alert("智能导入需要使用 AI 进行结构分析，请先配置 API Key。");
+          setIsSettingsOpen(true);
+          return;
+      }
+
+      addAgentLog('Supervisor', '开始分析导入的论文结构...', 'processing');
+
+      try {
+          // 1. Filter Body Chapters via AI
+          const headings = extractedChapters.map(c => ({
+              id: c.id,
+              title: c.title,
+              previewText: (c.content || "").slice(0, 200) + (c.subsections?.[0]?.content || "").slice(0, 100)
+          }));
+
+          const analysis = await analyzeImportedStructure(headings, settingsWithCallback);
+          
+          if (!analysis.bodyChapterIds || analysis.bodyChapterIds.length === 0) {
+              throw new Error("AI 未能识别出正文章节，请检查文档格式。");
+          }
+
+          // Filter only body chapters
+          const bodyChapters = extractedChapters.filter(c => analysis.bodyChapterIds.includes(c.id));
+          
+          // 2. Set Title if guess is available
+          const importedTitle = analysis.thesisTitleGuess || "未命名导入论文";
+          
+          addAgentLog('Supervisor', `结构识别完成。保留核心章节 ${bodyChapters.length} 个，推测题目: ${importedTitle}`, 'success');
+
+          // 3. Reverse Engineer Metadata & Status
+          const processedChapters = await Promise.all(bodyChapters.map(async (ch) => {
+              // Heuristic: If chapter has decent content or subsections with content
+              // Flatten content
+              const getFullText = (c: Chapter): string => {
+                  let text = c.content || "";
+                  if (c.subsections) text += c.subsections.map(getFullText).join("\n");
+                  return text;
+              };
+              
+              const fullText = getFullText(ch);
+              const isSubstantial = fullText.length > 500; // Threshold for "Written"
+
+              if (isSubstantial) {
+                  addAgentLog('Methodologist', `正在逆向解析章节 "${ch.title}" 的核心逻辑...`, 'processing');
+                  const metadata = await reverseEngineerMetadata(ch.title, fullText, settingsWithCallback);
+                  
+                  return {
+                      ...ch,
+                      status: 'completed', // Mark as written
+                      designConfirmed: true, // Structure is fixed
+                      metadata: {
+                          ...ch.metadata,
+                          ...metadata,
+                          isCoreChapter: true
+                      }
+                  } as Chapter;
+              } else {
+                  return {
+                      ...ch,
+                      status: 'pending',
+                      designConfirmed: true, // Structure exists from XML
+                      metadata: { isCoreChapter: true }
+                  } as Chapter;
+              }
+          }));
+
+          // 4. Update State and Jump
+          setThesis({
+              title: importedTitle,
+              chapters: processedChapters
+          });
+          
+          addAgentLog('Supervisor', `导入完成！即将跳转至写作工作台。`, 'success');
+          setCurrentStep('writing'); // Skip title, structure, discussion phases
+
+      } catch (e) {
+          console.error(e);
+          addAgentLog('Supervisor', `导入分析失败: ${e}`, 'error');
+          alert("导入失败，请重试或选择常规流程。");
+      }
   };
 
   const handleTitleConfirm = (title: string) => {
@@ -284,6 +370,7 @@ const App: React.FC = () => {
               onUpload={handleFileUpload} 
               formatRules={formatRules}
               onNext={() => setCurrentStep('title')}
+              onImportExisting={handleThesisImport} // Pass import handler
             />
           )}
 

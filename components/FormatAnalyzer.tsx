@@ -1,22 +1,44 @@
 
 import React, { useState } from 'react';
-import { FormatRules } from '../types';
+import { FormatRules, Chapter } from '../types';
 import StructureVisualizer from './StructureVisualizer';
+import { extractThesisFromXML } from '../services/xmlParser';
 
 interface FormatAnalyzerProps {
   onUpload: (content: string) => void;
   formatRules: FormatRules | null;
   onNext: () => void;
+  // NEW: Callback for importing existing thesis flow
+  onImportExisting?: (extractedChapters: Chapter[], rawTextPreview: string) => void;
 }
 
-const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, onNext }) => {
+const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, onNext, onImportExisting }) => {
   const [dragActive, setDragActive] = useState(false);
+  const [hasExistingContent, setHasExistingContent] = useState(false);
+  const [previewContent, setPreviewContent] = useState("");
+  const [extractedData, setExtractedData] = useState<{chapters: Chapter[], rawTextPreview: string} | null>(null);
 
   const handleFile = (file: File) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const content = e.target?.result as string;
       onUpload(content);
+      
+      // Attempt to extract existing content
+      try {
+          const data = extractThesisFromXML(content);
+          // Threshold: At least one L1 chapter and some text content
+          if (data.chapters.length > 0 && data.rawTextPreview.length > 300) {
+              setHasExistingContent(true);
+              setPreviewContent(data.rawTextPreview);
+              setExtractedData(data);
+          } else {
+              setHasExistingContent(false);
+          }
+      } catch (err) {
+          console.warn("Extraction check failed", err);
+          setHasExistingContent(false);
+      }
     };
     reader.readAsText(file);
   };
@@ -53,26 +75,71 @@ const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, 
                <p className="text-slate-500 text-sm">已自动识别 XML 结构层次</p>
              </div>
           </div>
-          <div className="flex gap-3">
-             <button 
-               onClick={onNext}
-               className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-xl text-sm font-bold shadow-lg shadow-blue-200 transition-all flex items-center gap-2 hover:scale-105"
-             >
-               确认并下一步 <span className="text-lg">→</span>
-             </button>
-          </div>
+          
+          {/* Default Next Button (Only shown if no existing content found, or as fallback) */}
+          {!hasExistingContent && (
+              <button 
+                onClick={onNext}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-xl text-sm font-bold shadow-lg shadow-blue-200 transition-all flex items-center gap-2 hover:scale-105"
+              >
+                确认并下一步 <span className="text-lg">→</span>
+              </button>
+          )}
         </div>
 
-        <div className="flex-1 overflow-hidden border rounded-xl bg-slate-50">
-           {/* Use the Unified Visualizer here passing empty thesis structure initially */}
-           <StructureVisualizer formatRules={formatRules} thesis={{ title: '', chapters: [] }} />
-        </div>
-        
-        <div className="mt-4 shrink-0 bg-blue-50/50 p-3 rounded-lg border border-blue-100 text-xs text-slate-500 flex gap-4">
-           <span>📚 样式映射: Heading1={formatRules.styleIds.heading1}</span>
-           <span>🔤 正文字体: {formatRules.fontMain}</span>
-           <span>📐 纸张: {formatRules.metadata.paperSize}</span>
-        </div>
+        {/* If existing content is found, show the Two Options UI overlaying the visualizer area or above it */}
+        {hasExistingContent && onImportExisting && extractedData ? (
+            <div className="flex-1 flex flex-col items-center justify-center bg-slate-50 rounded-xl border border-slate-200 p-8 space-y-6">
+                <div className="text-center">
+                    <h3 className="text-xl font-bold text-slate-800">💡 检测到文档中包含已撰写的内容</h3>
+                    <p className="text-slate-500 mt-2">系统识别出约 <span className="font-mono font-bold text-blue-600">{extractedData.chapters.length}</span> 个章节结构和 <span className="font-mono font-bold text-blue-600">{previewContent.length}</span> 字的正文。请选择操作模式：</p>
+                </div>
+                
+                <div className="flex gap-6 w-full max-w-3xl">
+                    {/* Option 1: Template Only */}
+                    <button 
+                        onClick={onNext}
+                        className="flex-1 bg-white p-6 rounded-xl border-2 border-slate-200 hover:border-blue-400 hover:shadow-xl transition-all group text-left relative overflow-hidden"
+                    >
+                        <div className="absolute top-0 right-0 bg-slate-200 text-slate-600 text-[10px] font-bold px-2 py-1 rounded-bl">常规模式</div>
+                        <div className="text-4xl mb-4 grayscale group-hover:grayscale-0 transition-all">📄</div>
+                        <h4 className="font-bold text-lg text-slate-800 group-hover:text-blue-600">作为空白模版使用</h4>
+                        <p className="text-sm text-slate-500 mt-2 leading-relaxed">
+                            忽略文档中的现有正文，仅提取样式规则。我们将从“题目确认”开始，引导您从零开始进行大纲设计与撰写。
+                        </p>
+                    </button>
+
+                    {/* Option 2: Smart Import */}
+                    <button 
+                        onClick={() => onImportExisting(extractedData.chapters, extractedData.rawTextPreview)}
+                        className="flex-1 bg-purple-50 p-6 rounded-xl border-2 border-purple-200 hover:border-purple-500 hover:shadow-xl transition-all group text-left relative overflow-hidden"
+                    >
+                        <div className="absolute top-0 right-0 bg-purple-200 text-purple-700 text-[10px] font-bold px-2 py-1 rounded-bl">推荐</div>
+                        <div className="text-4xl mb-4 group-hover:scale-110 transition-transform">🚀</div>
+                        <h4 className="font-bold text-lg text-purple-800">智能导入 (断点续写)</h4>
+                        <p className="text-sm text-purple-600/80 mt-2 leading-relaxed">
+                            AI 将分析现有章节结构，保留已写内容，并自动推导核心探讨记录。您可以直接跳过前期步骤，在现有进度上继续完善。
+                        </p>
+                    </button>
+                </div>
+                
+                <div className="text-xs text-slate-400 mt-4 border-t pt-4 w-full text-center">
+                    当前预览: <span className="font-mono">{previewContent.slice(0, 50)}...</span>
+                </div>
+            </div>
+        ) : (
+            <>
+                <div className="flex-1 overflow-hidden border rounded-xl bg-slate-50">
+                   <StructureVisualizer formatRules={formatRules} thesis={{ title: '', chapters: [] }} />
+                </div>
+                
+                <div className="mt-4 shrink-0 bg-blue-50/50 p-3 rounded-lg border border-blue-100 text-xs text-slate-500 flex gap-4">
+                   <span>📚 样式映射: Heading1={formatRules.styleIds.heading1}</span>
+                   <span>🔤 正文字体: {formatRules.fontMain}</span>
+                   <span>📐 纸张: {formatRules.metadata.paperSize}</span>
+                </div>
+            </>
+        )}
       </div>
     );
   }

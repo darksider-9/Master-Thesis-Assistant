@@ -10,7 +10,8 @@ import {
   TemplateBlock,
   MappingSectionKind,
   StyleSettings,
-  StyleConfig
+  StyleConfig,
+  Chapter
 } from "../types";
 
 // -------------------- Namespaces --------------------
@@ -211,7 +212,122 @@ const getStyleNameById = (stylesRoot: Element, styleId: string): string | null =
     return styleId; // Fallback to ID if name not found
 };
 
-// --- NEW HELPER: Check for Auto Numbering in Styles ---
+// --- NEW HELPER: Extract existing content to Tree ---
+export interface ExtractedThesisData {
+    chapters: Chapter[];
+    rawTextPreview: string; // First 1000 chars for analysis
+}
+
+export const extractThesisFromXML = (xmlString: string): ExtractedThesisData => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlString, "text/xml");
+    
+    // 1. Resolve Styles
+    const stylesPart = getPkgPart(doc, "/word/styles.xml");
+    const stylesRoot = getPartXmlRoot(stylesPart!);
+    const headingStyles = stylesRoot ? buildHeadingStyles(stylesRoot) : { 1: "2", 2: "4", 3: "5" };
+    
+    // 2. Scan Body
+    const docPart = getPkgPart(doc, "/word/document.xml");
+    const docRoot = getPartXmlRoot(docPart!);
+    const body = getChildByTagNameNS(docRoot!, NS.w, "body");
+    
+    if (!body) return { chapters: [], rawTextPreview: "" };
+
+    const chapters: Chapter[] = [];
+    
+    // Pointers for tree construction
+    let currentL1: Chapter | null = null;
+    let currentL2: Chapter | null = null;
+    let currentL3: Chapter | null = null;
+    
+    // Helper to get the active target for content
+    const getActiveTarget = () => currentL3 || currentL2 || currentL1;
+
+    let totalTextPreview = "";
+    
+    const children = Array.from(body.children);
+    
+    let globalIndex = 0;
+
+    children.forEach(node => {
+        if (node.localName !== 'p' && node.localName !== 'tbl') return;
+        
+        const text = node.localName === 'p' ? getParaTextRaw(node).trim() : "";
+        const styleId = node.localName === 'p' ? extractStyleId(node) : null;
+        
+        // --- LEVEL 1 HEADING ---
+        if (styleId === headingStyles[1]) {
+            // New Level 1 Chapter
+            currentL1 = {
+                id: `ch_${++globalIndex}`,
+                title: text || `Chapter ${globalIndex}`,
+                level: 1,
+                content: "",
+                subsections: []
+            };
+            chapters.push(currentL1);
+            // Reset lower levels
+            currentL2 = null;
+            currentL3 = null;
+        }
+        // --- LEVEL 2 HEADING ---
+        else if (styleId === headingStyles[2]) {
+            if (currentL1) {
+                currentL2 = {
+                    id: `sec_${++globalIndex}`,
+                    title: text || `Section`,
+                    level: 2,
+                    content: "",
+                    subsections: []
+                };
+                currentL1.subsections = currentL1.subsections || [];
+                currentL1.subsections.push(currentL2);
+                currentL3 = null;
+            }
+        }
+        // --- LEVEL 3 HEADING ---
+        else if (styleId === headingStyles[3]) {
+            if (currentL2) {
+                currentL3 = {
+                    id: `sub_${++globalIndex}`,
+                    title: text || `Subsection`,
+                    level: 3,
+                    content: "",
+                    subsections: []
+                };
+                currentL2.subsections = currentL2.subsections || [];
+                currentL2.subsections.push(currentL3);
+            }
+        }
+        // --- CONTENT (Paragraph or Table) ---
+        else {
+            const target = getActiveTarget();
+            if (target) {
+                if (node.localName === 'tbl') {
+                    target.content = (target.content || "") + "\n\n[[TBL:包含一个表格]]\n\n";
+                } else if (text) {
+                    // Check for image like
+                    if (hasImageLike(node)) {
+                        target.content = (target.content || "") + "\n\n[[FIG:包含图片]]\n\n";
+                    }
+                    target.content = (target.content || "") + text + "\n\n";
+                    
+                    if (totalTextPreview.length < 2000) {
+                        totalTextPreview += text + " ";
+                    }
+                }
+            }
+        }
+    });
+
+    return { chapters, rawTextPreview: totalTextPreview };
+};
+
+// ... (Rest of existing code: isStyleAutoNumbered, isProtoAutoNumbered, etc.) ...
+// Keep everything below unchanged until parseWordXML
+// Ensure existing functions like generateThesisXML, updateHeadersAndFooters etc are preserved exactly.
+
 const isStyleAutoNumbered = (stylesRoot: Element | null, styleId: string): boolean => {
     if (!stylesRoot) return false;
     const styles = stylesRoot.getElementsByTagNameNS(NS.w, "style");
@@ -250,13 +366,12 @@ const getDocRelationships = (doc: Document): Record<string, string> => {
     return map;
 };
 
-// -------------------- DEBUG HELPER --------------------
 export interface HeaderDebugInfo {
     sectionIndex: number;
     detectedH1Style: string;
-    sectionStartText: string; // NEW: The text starting this section
+    sectionStartText: string; 
     headers: {
-        type: string | null; // default (odd), even, first
+        type: string | null;
         file: string;
         data: { text: string; fields: string[] };
     }[];
@@ -266,7 +381,6 @@ export const inspectHeaderDebugInfo = (xmlString: string): HeaderDebugInfo[] => 
     const parser = new DOMParser();
     const doc = parser.parseFromString(xmlString, "text/xml");
     
-    // 1. Detect H1 Style Name for Debug Info
     const stylesPart = getPkgPart(doc, "/word/styles.xml");
     let detectedH1 = "Unknown";
     if (stylesPart) {
@@ -277,29 +391,24 @@ export const inspectHeaderDebugInfo = (xmlString: string): HeaderDebugInfo[] => 
         }
     }
 
-    // 2. Parse Relationships
     const relsMap = getDocRelationships(doc);
 
-    // 3. Parse Headers Content Map
     const headerContentMap: Record<string, {text: string, fields: string[]}> = {};
     const parts = doc.getElementsByTagNameNS(NS.pkg, "part");
     for(let i=0; i<parts.length; i++) {
         const name = parts[i].getAttributeNS(NS.pkg, "name");
         if(name && (name.includes("/word/header") || name.includes("/word/footer"))) {
-             // Extract content
              const xmlData = getChildByTagNameNS(parts[i], NS.pkg, "xmlData");
              const root = xmlData?.firstElementChild;
              if(root) {
                  const texts = Array.from(root.getElementsByTagNameNS(NS.w, "t")).map(n => n.textContent || "").join(" ");
                  const instrs = Array.from(root.getElementsByTagNameNS(NS.w, "instrText")).map(n => n.textContent || "");
-                 // Cleanup name to match rels target (e.g. /word/header1.xml -> header1.xml)
                  const shortName = name.split('/').pop()!;
                  headerContentMap[shortName] = { text: texts, fields: instrs };
              }
         }
     }
 
-    // 4. Scan Sections in Document (Improved Linear Scan)
     const debugInfo: HeaderDebugInfo[] = [];
     const docPart = getPkgPart(doc, "/word/document.xml");
     const docRoot = getPartXmlRoot(docPart!);
@@ -309,7 +418,6 @@ export const inspectHeaderDebugInfo = (xmlString: string): HeaderDebugInfo[] => 
         let sectIndex = 1;
         let currentSectionStartText = "";
         
-        // Helper to extract refs from a sectPr
         const extractRefs = (sectPr: Element, index: number, startText: string) => {
             const refs = sectPr.getElementsByTagNameNS(NS.w, "headerReference");
             const sectInfo: HeaderDebugInfo = { 
@@ -319,7 +427,7 @@ export const inspectHeaderDebugInfo = (xmlString: string): HeaderDebugInfo[] => 
                 headers: [] 
             };
             for(let i=0; i<refs.length; i++) {
-                const type = refs[i].getAttributeNS(NS.w, "type"); // default (odd), even, first
+                const type = refs[i].getAttributeNS(NS.w, "type");
                 const rid = refs[i].getAttributeNS(NS.r, "id");
                 if(rid && relsMap[rid]) {
                     const target = relsMap[rid].split('/').pop()!;
@@ -339,24 +447,20 @@ export const inspectHeaderDebugInfo = (xmlString: string): HeaderDebugInfo[] => 
             const node = children[i] as Element;
             
             if (node.localName === 'p') {
-                // Capture the start text of the section if we haven't yet
                 const text = getParaTextRaw(node).trim();
                 if (!currentSectionStartText && text) {
                     currentSectionStartText = text.substring(0, 50);
                 }
                 
-                // Check for Section Break inside Paragraph Properties (pPr -> sectPr)
                 const pPr = getChildByTagNameNS(node, NS.w, "pPr");
                 const sectPr = pPr ? getChildByTagNameNS(pPr, NS.w, "sectPr") : null;
                 
                 if (sectPr) {
-                    // This section break ends the current section
                     debugInfo.push(extractRefs(sectPr, sectIndex++, currentSectionStartText));
-                    currentSectionStartText = ""; // Reset for next section
+                    currentSectionStartText = ""; 
                 }
             } 
             else if (node.localName === 'sectPr') {
-                // This is a standalone section break (usually end of doc, or odd formatting)
                 debugInfo.push(extractRefs(node, sectIndex++, currentSectionStartText));
                 currentSectionStartText = "";
             }
@@ -368,8 +472,6 @@ export const inspectHeaderDebugInfo = (xmlString: string): HeaderDebugInfo[] => 
 
     return debugInfo;
 }
-
-// -------------------- GENERATION LOGIC --------------------
 
 let globalId = 80000; 
 
@@ -388,7 +490,6 @@ const findPrototypes = (body: Element, headingStyles: Record<number, string>): P
     const children = Array.from(body.children);
     let seenRefTitle = false;
 
-    // Pass 1: Strict Body Search (Avoid Front/Back Matter if possible)
     for (const node of children) {
         if (node.localName === 'tbl') {
             if (!protos.table) protos.table = node;
@@ -422,7 +523,6 @@ const findPrototypes = (body: Element, headingStyles: Record<number, string>): P
         if (hasFieldSEQ(node) && !protos.caption) protos.caption = node;
     }
 
-    // Pass 2: Fallback for H1 (If template is empty and only has Abstract/TOC as H1)
     if (!protos.h1) {
         for (const node of children) {
             if (node.localName !== 'p') continue;
@@ -440,7 +540,6 @@ const findPrototypes = (body: Element, headingStyles: Record<number, string>): P
     return protos;
 };
 
-// --- STYLE OVERRIDES ---
 const applyStyleOverrides = (doc: Document, node: Element, config?: StyleConfig) => {
     if (!config) return;
 
@@ -549,18 +648,15 @@ const createBookmark = (doc: Document, name: string, id: string, type: "start" |
     return el;
 };
 
-// --- NEW HELPER: Strict Linear Math Run ---
 const createMathRun = (doc: Document, text: string) => {
     const r = doc.createElementNS(NS.m, "m:r");
     
-    // m:rPr with sty p (Strict Linear Format Hint)
     const mRPr = doc.createElementNS(NS.m, "m:rPr");
     const sty = doc.createElementNS(NS.m, "m:sty");
     sty.setAttributeNS(NS.m, "m:val", "p");
     mRPr.appendChild(sty);
     r.appendChild(mRPr);
 
-    // w:rPr with Cambria Math
     const wRPr = doc.createElementNS(NS.w, "w:rPr");
     const rFonts = doc.createElementNS(NS.w, "w:rFonts");
     rFonts.setAttributeNS(NS.w, "w:ascii", "Cambria Math");
@@ -575,23 +671,18 @@ const createMathRun = (doc: Document, text: string) => {
     return r;
 };
 
-// --- Helpers for Headers & Math ---
-
 const updateHeadersAndFooters = (doc: Document, h1StyleName: string, settings?: StyleSettings, allowedParts?: Set<string>) => {
     const parts = doc.getElementsByTagNameNS(NS.pkg, "part");
     
-    // User Override has priority, otherwise use auto-detected
     const targetStyleName = settings?.header.headerReferenceStyle || h1StyleName || "标题 1";
 
     for (let i = 0; i < parts.length; i++) {
         const part = parts[i];
         const name = part.getAttributeNS(NS.pkg, "name");
         
-        // Filter: Only process if it is a header/footer
         const isHeaderFooter = name && (name.includes("/word/header") || name.includes("/word/footer"));
         if (!isHeaderFooter) continue;
         
-        // Filter: If allowedParts whitelist is provided, ensure this part is in it
         if (allowedParts && name && !allowedParts.has(name)) {
             continue;
         }
@@ -602,43 +693,28 @@ const updateHeadersAndFooters = (doc: Document, h1StyleName: string, settings?: 
         const root = xmlData.firstElementChild;
         if (!root) continue;
         
-        let foundTargetRef = false; // Flag to track if we've already handled the primary ref
+        let foundTargetRef = false; 
 
-        // 1. Fix STYLEREF to point to the correct Heading 1 Style Name
         const instrs = root.getElementsByTagNameNS(NS.w, "instrText");
         
         for (let j = 0; j < instrs.length; j++) {
             const instrNode = instrs[j];
             const text = instrNode.textContent || "";
             
-            // Logic A: Standard STYLEREF Replacement
             if (text.includes("STYLEREF") && settings?.header.oddPage === 'chapterTitle') {
                 const isMatchingTarget = text.includes(`"${targetStyleName}"`) || text.includes(targetStyleName);
                 
-                // If this is a STYLEREF to our target style...
                 if (isMatchingTarget || text.toLowerCase().includes("heading 1")) {
                      if (foundTargetRef) {
-                         // DUPLICATE DETECTED: This is likely the second part of a [Num] [Text] split.
-                         // Since our L1 is now Manual (Full Text), we don't want this second one.
-                         // We replace it with an empty QUOTE field which renders nothing.
                          instrNode.textContent = ' QUOTE "" ';
                          continue;
                      }
                      
-                     // FIRST OCCURRENCE: Keep it, but ensure switches are clean so it shows Full Text.
-                     // Remove \n (num only) or \t (text only) switches to let it default to Full Text?
-                     // Actually, if we leave it as is, and the paragraph has NO numbering,
-                     // STYLEREF should default to text.
-                     // But if it has \n (num only), and there is no num, it might show nothing or weirdness.
-                     // Safest is to remove switches.
                      let newText = text.replace(
                         /STYLEREF\s+(?:\\"[^"]+\\"|"[^"]+"|[^\s\\]+)/i, 
                         `STYLEREF "${targetStyleName}"`
                     );
                     
-                    // Remove common switches \n, \r, \t to force full paragraph capture
-                    // Preserve \* MERGEFORMAT if you want, or just strip all switches
-                    // Let's strip \n, \r, \t specifically.
                     newText = newText.replace(/\\n/gi, "").replace(/\\r/gi, "").replace(/\\t/gi, "");
                     
                     instrNode.textContent = newText;
@@ -647,24 +723,18 @@ const updateHeadersAndFooters = (doc: Document, h1StyleName: string, settings?: 
                 }
             }
             
-            // Logic B: Handle Split XML Nodes (Common in Word for "Heading 1" text only)
-            const trimmed = text.trim().replace(/^"/, "").replace(/"$/, ""); // Remove quotes
+            const trimmed = text.trim().replace(/^"/, "").replace(/"$/, "");
             const lowerTrimmed = trimmed.toLowerCase();
             
             if ((lowerTrimmed === "标题 1" || lowerTrimmed === "标题1" || lowerTrimmed === "heading 1" || lowerTrimmed === "heading1") && settings?.header.oddPage === 'chapterTitle') {
-                // If we already found a ref, this might be a loose node belonging to the second ref.
-                // It's hard to be precise without parsing context. 
-                // But generally, update the name.
                 instrNode.textContent = targetStyleName;
             }
         }
 
-        // 2. Fix Static Text (Even Headers)
         const texts = root.getElementsByTagNameNS(NS.w, "t");
         for (let j = 0; j < texts.length; j++) {
             const tNode = texts[j];
             const content = tNode.textContent || "";
-            // If it matches the school name pattern or is just a static even header
             if (content.includes("东南大学硕士学位论文") || content.includes("硕士学位论文")) {
                 if (settings?.header.evenPageText) {
                     tNode.textContent = settings.header.evenPageText;
@@ -674,7 +744,6 @@ const updateHeadersAndFooters = (doc: Document, h1StyleName: string, settings?: 
     }
 };
 
-// --- Refactored Content Node Creator ---
 const createContentNodes = (
     contentRaw: string, 
     doc: Document, 
@@ -686,10 +755,6 @@ const createContentNodes = (
     const nodes: Element[] = [];
     if (!contentRaw) return nodes;
 
-    // --- STRATEGY CHANGE: PRE-PROCESS TO FORCE BLOCK ELEMENTS ONTO NEW LINES ---
-    // If AI outputs "Text [[EQ:...]] Text", we force it to: "Text \n\n [[EQ:...]] \n\n Text"
-    // This ensures they are split into separate paragraphs below.
-    // We use a specific regex to capture FIG, TBL, EQ blocks.
     const processedRaw = contentRaw
         .replace(/(\[\[(?:FIG|TBL|EQ):[\s\S]*?\]\])/g, "\n\n$1\n\n");
 
@@ -709,14 +774,12 @@ const createContentNodes = (
         const trimmed = pText.trim();
         if (!trimmed) return;
 
-        // --- BLOCK ELEMENTS (Exclusive Paragraphs) ---
         if (trimmed.startsWith("[[FIG:")) {
              counters.fig++;
              const desc = trimmed.replace(/^\[\[FIG:/, "").replace(/\]\]$/, "");
              const bmId = (globalId++).toString();
              const bmName = `_Fig_${bmId}`;
              
-             // Image Placeholder
              const pImg = cloneWithText(doc, baseProto, "（在此处插入图片）");
              let pPr = getChildByTagNameNS(pImg, NS.w, "pPr");
              if(!pPr) { pPr = doc.createElementNS(NS.w, "w:pPr"); pImg.appendChild(pPr); }
@@ -727,7 +790,6 @@ const createContentNodes = (
              if (styleSettings) applyStyleOverrides(doc, pImg, styleSettings.body);
              nodes.push(pImg);
 
-             // Caption
              let pCap = protos.caption ? protos.caption.cloneNode(true) as Element : baseProto.cloneNode(true) as Element;
              const capPr = getChildByTagNameNS(pCap, NS.w, "pPr");
              while (pCap.firstChild) if(pCap.firstChild !== capPr) pCap.removeChild(pCap.firstChild); else pCap.removeChild(pCap.firstChild);
@@ -832,7 +894,6 @@ const createContentNodes = (
              const eqText = trimmed.replace(/^\[\[EQ:/, "").replace(/\]\]$/, "");
              
              const p = baseProto.cloneNode(true) as Element;
-             // clear children but keep pPr using simpler logic
              const pPr = getChildByTagNameNS(p, NS.w, "pPr");
              while (p.lastChild) {
                  if (p.lastChild !== pPr) p.removeChild(p.lastChild);
@@ -846,24 +907,20 @@ const createContentNodes = (
              oMathPara.appendChild(oMath);
 
              const separator = styleSettings?.equationSeparator || '-';
-             // Linear format string for Word to compile
              const linearMathString = `${eqText}#(${chapterIndex}${separator}${counters.eq})`;
              
-             // Use Strict Math Run (Equation 2 Style)
              const mR = createMathRun(doc, linearMathString);
              oMath.appendChild(mR);
 
              p.appendChild(oMathPara);
              nodes.push(p);
         }
-        // --- TEXT PARAGRAPHS (May contain Inline SYM/REF) ---
         else {
              const p = baseProto.cloneNode(true) as Element;
              const pPr = getChildByTagNameNS(p, NS.w, "pPr");
              while (p.firstChild) if(p.firstChild !== pPr) p.removeChild(p.firstChild); else p.removeChild(p.firstChild);
              if (pPr) p.appendChild(pPr);
 
-             // Split by inline tags
              const parts = trimmed.split(/(\[\[(?:SYM|REF):.*?\]\])/g);
              
              parts.forEach(part => {
@@ -873,7 +930,6 @@ const createContentNodes = (
                     const symText = part.replace(/^\[\[SYM:/, "").replace(/\]\]$/, "");
                     
                     const oMath = doc.createElementNS(NS.m, "m:oMath");
-                    // Use Strict Math Run for Inline too
                     const mR = createMathRun(doc, symText);
                     oMath.appendChild(mR);
                     p.appendChild(oMath);
@@ -898,7 +954,6 @@ const createContentNodes = (
                     }
                  } 
                  else {
-                     // Regular Text
                      const r = sampleRun!.cloneNode(true) as Element;
                      const rPr = getChildByTagNameNS(r, NS.w, "rPr");
                      while(r.firstChild) r.removeChild(r.firstChild);
@@ -928,7 +983,6 @@ const extractMapping = (
     const sections: MappingSection[] = [];
     const blocks: MappingBlock[] = [];
     
-    // Initial Section (Root/Front)
     let currentSection: MappingSection = {
         id: `sec_${globalId++}`,
         kind: 'front',
@@ -943,7 +997,6 @@ const extractMapping = (
     const children = Array.from(body.children);
     
     children.forEach((node, idx) => {
-        // We track p, tbl, sectPr
         if (node.localName !== 'p' && node.localName !== 'tbl' && node.localName !== 'sectPr') return;
         
         const order = idx;
@@ -954,7 +1007,6 @@ const extractMapping = (
         let text = "";
         let styleId: string | null = null;
         
-        // 1. Analyze Node
         if (node.localName === 'p') {
             text = getParaTextRaw(node);
             styleId = extractStyleId(node);
@@ -965,13 +1017,12 @@ const extractMapping = (
             else {
                 if (isFrontMatterTitle(text)) { type = 'front_title'; level = 1; }
                 else if (isBackMatterTitle(text)) { type = 'back_title'; level = 1; }
-                else if (isListOfTablesTitle(text)) type = 'toc_title'; // LOT
-                else if (isListOfFiguresTitle(text)) type = 'toc_title'; // LOF
+                else if (isListOfTablesTitle(text)) type = 'toc_title'; 
+                else if (isListOfFiguresTitle(text)) type = 'toc_title'; 
                 else if (hasImageLike(node)) type = 'image_placeholder';
                 else if (hasOMML(node)) type = 'equation';
                 else type = 'paragraph';
                 
-                // Heuristic for caption
                 if (styleId && (styleId.toLowerCase().includes('caption') || styleId === 'caption')) {
                      if (text.includes('图')) type = 'caption_figure';
                      else if (text.includes('表')) type = 'caption_table';
@@ -982,11 +1033,9 @@ const extractMapping = (
             type = 'table';
         }
         
-        // 2. Section Segmentation Logic
         let startNewSection = false;
         let nextKind: MappingSectionKind = currentSection.kind;
         
-        // If we hit a Level 1 Heading, or specific front/back titles
         if (level === 1) {
             startNewSection = true;
             if (isFrontMatterTitle(text)) {
@@ -1000,10 +1049,8 @@ const extractMapping = (
         }
         
         if (startNewSection) {
-             // Close previous
              currentSection.endOrder = order - 1;
              
-             // Open new
              currentSection = {
                  id: `sec_${globalId++}`,
                  kind: nextKind,
@@ -1016,7 +1063,6 @@ const extractMapping = (
              sections.push(currentSection);
         }
         
-        // 3. Create Block
         const blk: MappingBlock = {
             id: blockId,
             order,
@@ -1060,7 +1106,6 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
 
     const h1StyleName = stylesRoot ? getStyleNameById(stylesRoot, headingStyles[1]) : "标题 1";
 
-    // --- REORDERED LOGIC: Scan Body & Section Properties FIRST ---
     const children = Array.from(body.children);
     let startDeleteIdx = -1;
     let endDeleteIdx = -1;
@@ -1090,7 +1135,6 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
     }
     if (endDeleteIdx === -1) endDeleteIdx = children.length;
 
-    // --- NEW LOGIC: Robust Body SectPr Detection ---
     let effectiveBodySectPr: Element | null = null;
     if (startDeleteIdx !== -1) {
         if (endDeleteIdx < children.length && children[endDeleteIdx].localName === 'sectPr') {
@@ -1119,7 +1163,6 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
         }
     }
 
-    // Identify Whitelisted Header Parts
     let bodyHeaderPartNames: Set<string> | undefined = undefined;
     if (startDeleteIdx !== -1 && effectiveBodySectPr) {
         const relsMap = getDocRelationships(doc);
@@ -1137,16 +1180,12 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
         }
     }
 
-    // --- HEADER FIX START (Scoped to Body Parts) ---
-    // Update headers to point to this style name (not ID!)
     updateHeadersAndFooters(doc, h1StyleName || "标题 1", styleSettings, bodyHeaderPartNames);
-    // --- HEADER FIX END ---
 
     const protos = findPrototypes(body, headingStyles);
 
     let anchorNode: Node | null = null;
     
-    // --- Remove Old Body Content ---
     if (startDeleteIdx !== -1) {
         const toRemove = children.slice(startDeleteIdx, endDeleteIdx);
         toRemove.forEach(n => body.removeChild(n));
@@ -1169,9 +1208,6 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
              chapterCounters = { fig: 0, tbl: 0, eq: 0 };
              
              if (protos.h1) {
-                // LEVEL 1: Use Manual Full Title ("第一章 绪论")
-                // Do NOT strip prefix.
-                // Do REMOVE numPr to prevent double numbering (since we manually typed "第一章")
                 pTitle = cloneWithText(doc, protos.h1, titleText);
                 
                 const pPr = getChildByTagNameNS(pTitle, NS.w, "pPr");
@@ -1183,14 +1219,10 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
                 if(styleSettings) applyStyleOverrides(doc, pTitle, styleSettings.heading1);
              }
         } else if (ch.level === 2 && protos.h2) {
-             // LEVEL 2: STRIP Prefix ("1.1 标题" -> "标题").
-             // Do NOT remove numPr (rely on Auto Numbering to add "1.1")
              const strippedTitle = stripHeadingNumbering(titleText);
              pTitle = cloneWithText(doc, protos.h2, strippedTitle);
              if(styleSettings) applyStyleOverrides(doc, pTitle, styleSettings.heading2);
         } else if (ch.level === 3 && protos.h3) {
-             // LEVEL 3: STRIP Prefix ("1.1.1 标题" -> "标题").
-             // Do NOT remove numPr (rely on Auto Numbering to add "1.1.1")
              const strippedTitle = stripHeadingNumbering(titleText);
              pTitle = cloneWithText(doc, protos.h3, strippedTitle);
              if(styleSettings) applyStyleOverrides(doc, pTitle, styleSettings.heading3);
@@ -1216,7 +1248,6 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
 
     thesis.chapters.forEach(insertChapter);
     
-    // --- Re-attach Body Section Properties (Same logic as before) ---
     if (startDeleteIdx !== -1) {
          const lastRemoved = children[endDeleteIdx - 1];
          let lostSectPr: Element | null = null;
@@ -1250,31 +1281,23 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
     });
 
     if (refHeader && references.length > 0 && protos.refEntry) {
-        // --- NEW LOGIC: Remove old dummy references from template ---
         let sibling = refHeader.nextSibling;
         const nodesToRemove: Node[] = [];
         
-        // Scan forward until we hit something that clearly isn't a reference or end of doc
         while (sibling) {
             const next = sibling.nextSibling;
             if (sibling.nodeType === 1 && (sibling as Element).localName === 'p') {
                 const text = getParaTextRaw(sibling as Element).trim();
-                // Heuristic: If it looks like [1] ... or is empty, remove it.
-                // If it looks like "Back Matter Title" (e.g. Thanks), stop.
                 if (isBackMatterTitle(text) && !text.includes("参考文献")) {
                     break;
                 }
                 
-                // Matches [1], [12], 1., Reference 1, or empty
                 if (/^(\[\d+\]|\d+\.|Reference \d+)/i.test(text) || text === "") {
                     nodesToRemove.push(sibling);
                 } else {
-                    // Stop if we hit a normal paragraph that doesn't look like a ref?
-                    // Safe bet: just stop.
                     break;
                 }
             } else if (sibling.nodeType === 1 && (sibling as Element).localName === 'sectPr') {
-                 // Stop at section break
                  break;
             }
             sibling = next;

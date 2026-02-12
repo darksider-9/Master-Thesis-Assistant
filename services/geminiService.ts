@@ -368,7 +368,88 @@ export const chatWithMethodologySupervisor = async (history: ChatMessage[], thes
   }
 };
 
-// --- Advanced Mode: Skeleton Planning (Upgraded) ---
+// --- NEW: Advanced Import Analysis ---
+
+export const analyzeImportedStructure = async (
+    headings: { id: string, title: string, previewText: string }[],
+    settings: ApiSettings
+): Promise<{ bodyChapterIds: string[], thesisTitleGuess: string }> => {
+    
+    const inputJson = JSON.stringify(headings, null, 2);
+    
+    const systemPrompt = `
+    你是一名“学术论文结构分析师”。你的任务是分析一份导入的 Word 文档的以及一级标题列表，判断哪些属于“正文核心章节”。
+
+    【判断逻辑】
+    1. **正文核心章节 (Body Chapters)**：通常包括 绪论/引言、相关工作、方法/模型/理论、实验/分析、总结与展望。
+       - 特征：带有“第X章”编号，或标题语义明显属于学术内容。
+    2. **非正文 (Front/Back Matter)**：
+       - 摘要、Abstract、目录、图目录、表目录、致谢、参考文献、附录、攻读期间发表论文等。
+       - 这些**不**属于核心撰写章节，应被排除。
+
+    【输入格式】
+    一个包含 { id, title, previewText } 的数组。PreviewText 是该标题下的前几句文字，辅助判断。
+
+    【输出格式】
+    JSON:
+    {
+      "bodyChapterIds": ["ch_1", "ch_2", ...], // 只包含正文章节的 ID
+      "thesisTitleGuess": "从正文第一章或封面推测的论文题目 (如果无法推测则留空)"
+    }
+    `;
+
+    try {
+        const text = await generateContentUnified(settings, {
+            systemPrompt,
+            userPrompt: `【待分析标题列表】\n${inputJson}`,
+            jsonMode: true
+        });
+        return JSON.parse(cleanJsonText(text));
+    } catch (e) {
+        console.error("Structure Analysis Failed", e);
+        return { bodyChapterIds: [], thesisTitleGuess: "" };
+    }
+};
+
+export const reverseEngineerMetadata = async (
+    chapterTitle: string,
+    fullContent: string,
+    settings: ApiSettings
+): Promise<any> => {
+    // Limit content size to avoid context overflow, but keep enough for summary
+    const truncatedContent = fullContent.slice(0, 15000); 
+
+    const systemPrompt = `
+    你是一名“学术内容逆向工程师”。用户导入了已经写好的论文章节。
+    你的任务是阅读该章节内容，反向提取出结构化元数据 (Metadata)，以便系统认为“核心探讨”已完成。
+
+    章节标题：${chapterTitle}
+
+    【提取目标 (finalizedMetadata)】
+    请生成一个 JSON 对象，包含以下字段（如果文中没有相关内容，请填 "用户已撰写，但未明确提及"）：
+    - methodology: 核心方法、算法流程、改进点摘要。
+    - dataSources: 数据集名称、来源。
+    - experimentalDesign: 实验环境、对比算法、评价指标。
+    - resultsAnalysis: 核心结论摘要。
+    - figurePlan: 文中已有的图片描述列表 (e.g. ["图1: 流程图", "图2: 结果对比"])。
+    - tablePlan: 文中已有的表格描述列表。
+
+    请基于以下内容进行提取：
+    `;
+
+    try {
+        const text = await generateContentUnified(settings, {
+            systemPrompt,
+            userPrompt: truncatedContent,
+            jsonMode: true
+        });
+        return JSON.parse(cleanJsonText(text));
+    } catch (e) {
+        console.error("Reverse Engineering Failed", e);
+        return {};
+    }
+};
+
 export const generateSkeletonPlan = async (
     thesisTitle: string,
     chapterInfo: Chapter,
