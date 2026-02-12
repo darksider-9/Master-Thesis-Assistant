@@ -650,6 +650,107 @@ export interface WriteSectionContext {
   chapterIndex: number; // New: For numbering
 }
 
+// --- NEW: Quick Mode Writer (Allows Hallucinated Refs with strict placeholders) ---
+export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
+  const { thesisTitle, chapterLevel1, targetSection, userInstructions, settings, discussionHistory, fullChapterTree, globalRefs, targetWordCount, chapterIndex } = ctx;
+
+  const structureContext = fullChapterTree 
+      ? JSON.stringify(fullChapterTree.map(c => ({ title: c.title, subsections: c.subsections?.map(s => s.title) })), null, 2)
+      : "（无完整目录信息）";
+
+  // Existing refs for reuse check
+  const globalRefStr = globalRefs.map(r => `[RefID: ${r.id}] ${r.description}`).join("\n");
+
+  const wordCountInstruction = targetWordCount 
+      ? `【重要字数要求】本节内容的生成长度**必须**至少达到 ${targetWordCount} 字。`
+      : "";
+
+  const systemPrompt = `
+    ${HUMAN_WRITING_STYLE}
+    
+    【写作任务背景 (快速模式 / Quick Mode)】
+    **模式说明**: 当前为快速生成模式，你没有外部论文检索工具。请利用你的内在知识库进行撰写。
+    
+    题目：${thesisTitle}
+    当前章节：${targetSection.title} (Level ${targetSection.level}, 第${chapterIndex}章)
+    
+    ${wordCountInstruction}
+
+    【全文结构上下文】
+    ${structureContext}
+
+    【结构约束 (Structure Constraints)】
+    1. **扁平化输出**：你当前的任务是撰写 "${targetSection.title}" 这一具体小节的内容。
+    2. **严禁嵌套标题**：请直接输出正文段落，**绝对禁止**在回复中自己生成下一级的小标题（例如：不要在 2.1 节里自己编造 2.1.1 标题）。保持平铺直叙。
+    3. **只写正文**：不要重复打印当前章节的标题。
+
+    【参考文献引用规则 (Citation Logic - CRITICAL)】
+    由于你没有外部 Context，请遵循以下**混合引用策略**：
+    
+    1. **复用 (Reuse)**: 检查下方的【全局参考文献库】。如果你想引用的内容（如同源文献）已经存在于库中，且只有当【已存文献】与你当前想引用的内容在**概念层级**上完全一致时，，**必须**直接复用其 ID。
+       - 格式: \`[[REF:ID]]\` (例如 \`[[REF:12]]\`)。
+    2. **新增占位 (New)**: 如果你想引用某篇经典文献或观点，但库里没有，请生成一个**关键词占位符**。
+       - 格式: \`[[REF:作者 年份 关键词]]\` (例如 \`[[REF:He 2016 ResNet]]\` 或 \`[[REF:Attention Is All You Need Transformer]]\`)。
+       - **禁止**：严禁自己编造数字ID（如[99]），严禁生成虚假的完整引用格式。只生成关键词描述。
+       - 系统后续会自动根据这些关键词去匹配或创建新的引用条目。
+    **⚠️ 严禁滥用引用 ID (Strict Granularity Rule)**：
+            只有当【已存文献】与你当前想引用的内容在**概念层级**上完全一致时，才允许复用。
+    **举例说明（必须遵守）**：
+    - **场景 1 (U-Net)**: 
+      - 如果文中提到 "使用 U-Net 进行分割"，且全局库中有 *Ronneberger et al. U-Net...*，则**必须**复用该参考文献。
+      - 如果全局库中只有一本通用的《深度学习》教材，**绝对禁止**引用它来佐证 "U-Net" 的具体细节，必须新建引用 [[REF:Ronneberger U-Net...]]。
+      - 如果文中提到 "Attention U-Net"，**绝对禁止**引用原始 U-Net 的 ID，必须新建 "Attention U-Net" 的引用。
+    - **场景 2 (L1/L2 Loss)**:
+      - 如果 L1 Loss 和 L2 Loss 的定义出自同一篇综述文章，且该文章已在库中，则两者可以共用同一个 ID。
+      - 如果文中讨论的是 "Focal Loss"，而库中只有 "Cross Entropy Loss" 的文献，**禁止**复用，必须新建。
+    
+    **操作指令**:
+    1. **复用**: 只有确认颗粒度匹配时，使用 \`[[REF:ID]]\` (如 [[REF:12]])。
+    2. **新增**: 如果库中没有匹配层级的文献，使用 \`[[REF:详细文献标题/描述]]\`。
+    3. **多重引用**: 如果需要同时引用多个，请写成 \`[[REF:1]][[REF:2]]\`，**严禁**使用逗号合并如 \`[1,2]\`。
+
+    【全局参考文献库 (Global References)】
+    ${globalRefStr || "(暂无全局文献)"}
+
+    【专业术语与翻译名词规范 (CRITICAL)】
+    1. **严格区分“专业术语”与“普通翻译名词”**：
+       - **专业术语** (具有行业公认英文缩写): 首次出现必须使用“中文全称 (英文全称, 英文缩写)”格式。
+         * 例如：“生成对抗网络 (Generative Adversarial Networks, GAN)”。
+         * 后续直接使用缩写 (如 "GAN")。
+       - **普通翻译名词** (无特定缩写): 直接使用中文，**禁止**强行编造缩写或附带英文。
+         * 例如：“生成器”直接写“生成器”，**不要**写“生成器 (Generator, G)”。
+         * 例如：“损失函数”直接写“损失函数”，**不要**写“损失函数 (Loss Function)”。
+    2. 确保缩写在当前章节内的上下文一致性。
+
+    【格式占位符规范】
+    1. **只输出正文**，不要输出章节标题。
+    2. **图表占位与引用 (Real-time Sync Rendering)**:
+       - 插入图片：使用 \`[[FIG:描述]]\`。例如 \`[[FIG:U-Net网络结构]]\`。
+       - 引用图片：使用 \`[[REF_FIG:描述]]\`。例如 \`如图 [[REF_FIG:U-Net网络结构]] 所示\`。
+       - 插入表格：\`[[TBL:描述]]\`。
+       - 引用表格：\`见表 [[REF_TBL:描述]]\`。
+    3. **段落**：普通文本段落之间用换行符分隔。不要使用 XML/HTML 标签。
+    4. **数学公式规范**:
+       - **独立公式（带编号）**：\`[[EQ:公式内容]]\` (例如: \`[[EQ:E=mc^2]]\`)
+       - **行内数学符号（无编号）**：\`[[SYM:数学符号]]\`
+         * 必须嵌入在句子中间，**禁止**在 \`[[SYM:...]]\` 前后加换行符！
+         * 使用标准 LaTeX 格式。
+
+    【撰写指令】
+    ${userInstructions ? userInstructions : "请根据标题进行学术撰写，逻辑清晰，论证充分。"}
+
+    请开始撰写：
+  `;
+
+  try {
+    const text = await generateContentUnified(settings, { systemPrompt, userPrompt: "请开始撰写本小节内容 (Quick Mode)", jsonMode: false });
+    return cleanMarkdownArtifacts(text);
+  } catch (e) {
+    throw new Error(`撰写失败: ${e instanceof Error ? e.message : '未知错误'}`);
+  }
+};
+
+
 export const writeSingleSection = async (ctx: WriteSectionContext) => {
   const { thesisTitle, chapterLevel1, targetSection, userInstructions, settings, discussionHistory, fullChapterTree, globalRefs, targetWordCount, chapterIndex } = ctx;
 
@@ -723,9 +824,6 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
     2. **新增**: 如果库中没有匹配层级的文献，使用 \`[[REF:详细文献标题/描述]]\`。
     3. **多重引用**: 如果需要同时引用多个，请写成 \`[[REF:1]][[REF:2]]\`，**严禁**使用逗号合并如 \`[1,2]\`。
 
-    【指令与逻辑骨架（非常重要）】
-    ${userInstructions ? userInstructions : "无特殊指令，请按照标准学术规范撰写。"}
-
     【专业术语与翻译名词规范 (CRITICAL)】
     1. **严格区分“专业术语”与“普通翻译名词”**：
        - **专业术语** (具有行业公认英文缩写): 首次出现必须使用“中文全称 (英文全称, 英文缩写)”格式。
@@ -744,7 +842,13 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
        - 插入表格：\`[[TBL:描述]]\`。
        - 引用表格：\`见表 [[REF_TBL:描述]]\`。
     3. **段落**：普通文本段落之间用换行符分隔。不要使用 XML/HTML 标签。
-
+    4. **数学公式规范**:
+       - **独立公式（带编号）**：\`[[EQ:公式内容]]\` (例如: \`[[EQ:E=mc^2]]\`)
+       - **行内数学符号（无编号）**：\`[[SYM:数学符号]]\`
+         * 必须嵌入在句子中间，**禁止**在 \`[[SYM:...]]\` 前后加换行符！
+         * 使用标准 LaTeX 格式。
+    【指令与逻辑骨架（非常重要）】
+    ${userInstructions ? userInstructions : "无特殊指令，请按照标准学术规范撰写。"}
     请开始撰写：
   `;
 
@@ -1131,6 +1235,7 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
    updatedChapters = finalUpdateRecursive(updatedChapters);
 
    // --- PHASE 5: Reference Metadata Validation & Formatting (Strict GB/T 7714) ---
+   // MODIFIED: Skip strict formatting for refs without metadata (Quick Mode Refs)
    if (onLog) onLog("Phase 5: 正在进行参考文献严格格式校验 (GB/T 7714)...");
    
    finalRefOrder.forEach(ref => {
@@ -1172,7 +1277,9 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
            // Update description strictly
            ref.description = finalStr;
        } else {
-           if (onLog) onLog(`⚠️ 警告: 文献 [${ref.id}] "${ref.description.substring(0,20)}..." 缺少结构化元数据，格式可能不标准。`);
+           // FOR QUICK MODE REFS:
+           // Do not overwrite description if metadata is missing. Just log.
+           if (onLog) onLog(`⚠️ 跳过格式化: 文献 [${ref.id}] 为快速模式生成，保留原始描述。`);
        }
    });
 

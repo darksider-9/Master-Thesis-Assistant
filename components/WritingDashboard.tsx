@@ -1,7 +1,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { ThesisStructure, Chapter, FormatRules, Reference, AgentLog, ApiSettings, SectionPlan, SearchProvider, SearchResult, SearchHistoryItem, CitationStyle, SkeletonBlock } from '../types';
-import { writeSingleSection, runPostProcessingAgents, generateSkeletonPlan, polishDraftContent, finalizeAcademicStyle, filterSearchResultsAI } from '../services/geminiService';
+import { writeSingleSection, writeSingleSectionQuickMode, runPostProcessingAgents, generateSkeletonPlan, polishDraftContent, finalizeAcademicStyle, filterSearchResultsAI } from '../services/geminiService';
 import { searchAcademicPapers, fetchDetailedRefMetadata } from '../services/searchService';
 import { generateContextEntry, formatCitation } from '../utils/citationFormatter';
 import SearchHistoryModal from './SearchHistoryModal';
@@ -386,7 +386,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                   constructedInstruction += `\n【用户额外指令】\n${instructions[nodeId]}`;
               }
 
-              // Draft
+              // Draft (Using Advanced Mode Writer for Auto-Pilot as it uses Search Context)
               let content = await writeSingleSection({
                 thesisTitle: thesis.title,
                 chapterLevel1: selectedChapter,
@@ -583,7 +583,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
   };
 
 
-  // --- SIMPLE MODE HANDLER ---
+  // --- SIMPLE MODE HANDLER (UPDATED TO USE QUICK MODE PROMPT) ---
   const handleWriteSection = async (node: FlattenedNode) => {
     if (!selectedChapter || !apiSettings.apiKey) {
         alert("请检查 API Key 配置");
@@ -592,13 +592,15 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
     
     const nodeId = node.chapter.id;
     setLoadingNodes(prev => ({ ...prev, [nodeId]: true }));
-    addLog('Writer', `Step 1/3: 正在撰写: ${node.label} ${node.chapter.title}...`, 'processing');
+    addLog('Writer', `Step 1/3: 正在快速撰写: ${node.label} ${node.chapter.title} (Quick Mode)...`, 'processing');
 
     try {
       const userInstruction = instructions[nodeId] || "";
       
-      // STEP 1: Draft
-      let content = await writeSingleSection({
+      // STEP 1: Draft using Quick Mode Prompt
+      // This allows the model to generate "hallucinated" reference placeholders like [[REF:Author Year Keywords]]
+      // It also checks globalRefs for strict ID reuse.
+      let content = await writeSingleSectionQuickMode({
         thesisTitle: thesis.title,
         chapterLevel1: selectedChapter,
         targetSection: node.chapter,
@@ -629,7 +631,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
         chapters: updateNodeContent(prev.chapters, nodeId, content)
       }));
 
-      addLog('Writer', `✅ ${node.label} 撰写完成 (自动编号已渲染)`, 'success');
+      addLog('Writer', `✅ ${node.label} 快速撰写完成 (已生成关键词引用占位)`, 'success');
 
     } catch (e) {
       addLog('Writer', `❌ ${node.label} 失败: ${e}`, 'warning');

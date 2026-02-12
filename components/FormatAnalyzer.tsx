@@ -9,7 +9,7 @@ interface FormatAnalyzerProps {
   formatRules: FormatRules | null;
   onNext: () => void;
   // NEW: Callback for importing existing thesis flow
-  onImportExisting?: (extractedChapters: Chapter[], rawTextPreview: string) => void;
+  onImportExisting?: (extractedChapters: Chapter[], rawTextPreview: string) => Promise<void>;
 }
 
 const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, onNext, onImportExisting }) => {
@@ -17,6 +17,9 @@ const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, 
   const [hasExistingContent, setHasExistingContent] = useState(false);
   const [previewContent, setPreviewContent] = useState("");
   const [extractedData, setExtractedData] = useState<{chapters: Chapter[], rawTextPreview: string} | null>(null);
+  
+  // New state for loading animation
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const handleFile = (file: File) => {
     const reader = new FileReader();
@@ -43,6 +46,17 @@ const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, 
     reader.readAsText(file);
   };
 
+  const handleSmartImport = async () => {
+      if (!onImportExisting || !extractedData) return;
+      setIsAnalyzing(true);
+      try {
+          await onImportExisting(extractedData.chapters, extractedData.rawTextPreview);
+      } catch (e) {
+          console.error("Import failed", e);
+          setIsAnalyzing(false); // Only reset on error (success will unmount/navigate)
+      }
+  };
+
   const onDrag = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -64,7 +78,24 @@ const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, 
 
   if (formatRules) {
     return (
-      <div className="max-w-6xl mx-auto mt-6 bg-white p-6 rounded-2xl shadow-xl border border-blue-100 h-[600px] flex flex-col">
+      <div className="max-w-6xl mx-auto mt-6 bg-white p-6 rounded-2xl shadow-xl border border-blue-100 h-[600px] flex flex-col relative overflow-hidden">
+        {/* Loading Overlay */}
+        {isAnalyzing && (
+            <div className="absolute inset-0 z-50 bg-white/90 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in cursor-wait">
+                <div className="relative mb-6">
+                    <div className="w-20 h-20 border-4 border-slate-100 rounded-full"></div>
+                    <div className="w-20 h-20 border-4 border-t-purple-600 border-r-purple-600 border-b-transparent border-l-transparent rounded-full animate-spin absolute top-0 left-0"></div>
+                    <div className="absolute inset-0 flex items-center justify-center text-2xl">🧠</div>
+                </div>
+                <h3 className="text-2xl font-bold text-slate-800 animate-pulse">AI 正在深度解析文档结构...</h3>
+                <div className="mt-4 space-y-2 text-center text-slate-500 text-sm">
+                    <p>正在识别核心章节逻辑</p>
+                    <p>正在逆向推导研究方法与元数据</p>
+                    <p className="text-xs text-slate-400 mt-2 pt-2 border-t border-slate-100 w-64 mx-auto">预计耗时 10-30 秒，请保持页面开启</p>
+                </div>
+            </div>
+        )}
+
         <div className="flex items-center justify-between mb-6 border-b pb-4 shrink-0">
           <div className="flex items-center gap-4">
              <div className="w-12 h-12 bg-green-100 text-green-600 rounded-full flex items-center justify-center animate-bounce-in">
@@ -80,7 +111,8 @@ const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, 
           {!hasExistingContent && (
               <button 
                 onClick={onNext}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-xl text-sm font-bold shadow-lg shadow-blue-200 transition-all flex items-center gap-2 hover:scale-105"
+                disabled={isAnalyzing}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-xl text-sm font-bold shadow-lg shadow-blue-200 transition-all flex items-center gap-2 hover:scale-105 disabled:opacity-50 disabled:scale-100"
               >
                 确认并下一步 <span className="text-lg">→</span>
               </button>
@@ -99,7 +131,8 @@ const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, 
                     {/* Option 1: Template Only */}
                     <button 
                         onClick={onNext}
-                        className="flex-1 bg-white p-6 rounded-xl border-2 border-slate-200 hover:border-blue-400 hover:shadow-xl transition-all group text-left relative overflow-hidden"
+                        disabled={isAnalyzing}
+                        className="flex-1 bg-white p-6 rounded-xl border-2 border-slate-200 hover:border-blue-400 hover:shadow-xl transition-all group text-left relative overflow-hidden disabled:opacity-50 disabled:pointer-events-none"
                     >
                         <div className="absolute top-0 right-0 bg-slate-200 text-slate-600 text-[10px] font-bold px-2 py-1 rounded-bl">常规模式</div>
                         <div className="text-4xl mb-4 grayscale group-hover:grayscale-0 transition-all">📄</div>
@@ -111,8 +144,9 @@ const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, 
 
                     {/* Option 2: Smart Import */}
                     <button 
-                        onClick={() => onImportExisting(extractedData.chapters, extractedData.rawTextPreview)}
-                        className="flex-1 bg-purple-50 p-6 rounded-xl border-2 border-purple-200 hover:border-purple-500 hover:shadow-xl transition-all group text-left relative overflow-hidden"
+                        onClick={handleSmartImport}
+                        disabled={isAnalyzing}
+                        className="flex-1 bg-purple-50 p-6 rounded-xl border-2 border-purple-200 hover:border-purple-500 hover:shadow-xl transition-all group text-left relative overflow-hidden disabled:opacity-50 disabled:pointer-events-none"
                     >
                         <div className="absolute top-0 right-0 bg-purple-200 text-purple-700 text-[10px] font-bold px-2 py-1 rounded-bl">推荐</div>
                         <div className="text-4xl mb-4 group-hover:scale-110 transition-transform">🚀</div>
