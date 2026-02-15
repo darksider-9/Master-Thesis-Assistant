@@ -1,4 +1,5 @@
 
+
 export interface ReferenceMetadata {
   title: string;
   authors: string[];
@@ -105,6 +106,15 @@ export interface SearchHistoryItem {
 
 // --- Chapter & Thesis Structure Types ---
 
+// NEW: AI Context Persistence Interface
+export interface ChapterAIContext {
+    userInstruction?: string;
+    refTemplate?: string;
+    skeletonPlan?: SectionPlan;
+    referenceInput?: string; // Manually added context or auto-searched context summary
+    targetWordCount?: number;
+}
+
 export interface Chapter {
   id: string;
   title: string;
@@ -123,6 +133,8 @@ export interface Chapter {
       resultsAnalysis?: string;
       figurePlan?: string[];
       tablePlan?: string[];
+      // NEW: Store AI context here for persistence
+      aiContext?: ChapterAIContext;
   };
   chatHistory?: ChatMessage[];
 }
@@ -220,6 +232,7 @@ export interface StyleSettings {
   reference: StyleConfig;
   equationSeparator?: '-' | '.';
   header: HeaderConfig; // New Header Config
+  keepHeadingNumbers?: boolean; // NEW: Toggle to keep/strip manual heading numbers in export
 }
 
 // --- Visualizer Types ---
@@ -236,6 +249,8 @@ export interface VisualNode {
 
 // --- Advanced Mode: Skeleton & Planning Types ---
 
+export type CitationStrategy = 'search_new' | 'use_existing' | 'none';
+
 export interface SkeletonBlock {
   block_id: string;
   move: string;
@@ -247,6 +262,8 @@ export interface SkeletonBlock {
     KeywordsEN?: string[];
   };
   style_notes?: string;
+  // NEW: Strategy for this specific block
+  citation_strategy?: CitationStrategy; 
 }
 
 export interface SearchQueryInfo {

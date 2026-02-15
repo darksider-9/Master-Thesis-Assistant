@@ -1,6 +1,9 @@
 
+
 import { GoogleGenAI } from "@google/genai";
-import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings, ThesisStructure, SkeletonResponse, SearchResult } from "../types";
+import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings, ThesisStructure, SkeletonResponse, SearchResult, CitationStyle } from "../types";
+import { fetchDetailedRefMetadata, searchAcademicPapers, enrichReferenceMetadata } from "./searchService";
+import { formatCitation } from "../utils/citationFormatter";
 
 // --- OpenAI Compatible Interface ---
 
@@ -14,11 +17,11 @@ const cleanMarkdownArtifacts = (text: string) => {
 
   // Strategy: Split text by Formula/Symbol tags to protect them from cleaning.
   // We use capturing group () to keep the separators (the tags themselves) in the result array.
-  const parts = text.split(/(\[\[(?:EQ|SYM):[\s\S]*?\]\])/g);
+  const parts = text.split(/(\[\[(?:EQ|SYM|FIG|TBL|REF|REF_FIG|REF_TBL):[\s\S]*?\]\])/g);
 
   return parts.map(part => {
-      // 1. If it is a Formula or Symbol block, return exactly as is (Preserve * # etc.)
-      if (part.startsWith('[[EQ:') || part.startsWith('[[SYM:')) {
+      // 1. If it is a protected block, return exactly as is
+      if (part.startsWith('[[') && part.endsWith(']]')) {
           return part;
       }
 
@@ -26,11 +29,11 @@ const cleanMarkdownArtifacts = (text: string) => {
       return part
         // Remove bold markers **text** -> text
         .replace(/\*\*(.*?)\*\*/g, '$1') 
-        // Remove italic markers *text* -> text (Be careful not to kill single * used in math if outside EQ tags, but typically math is in EQ)
+        // Remove italic markers *text* -> text
         .replace(/(^|[^\*])\*([^\*]+)\*(?!\*)/g, '$1$2')     
         // Remove list bullets at start of line (* Item -> Item)
         .replace(/^\s*[\*\-]\s+/gm, '')
-        // Remove markdown headers (# Header -> Header) - Prevent AI from making sub-titles visible
+        // Remove markdown headers (# Header -> Header)
         .replace(/^#+\s+/gm, '')         
         // Remove backticks
         .replace(/`/g, '')
@@ -43,31 +46,43 @@ const cleanMarkdownArtifacts = (text: string) => {
 const HUMAN_WRITING_STYLE = `
 你是一名严谨的顶尖大学博士生，正在撰写学位论文。你的目标是产出**极度专业、客观、逻辑致密**的学术文本，彻底消除AI生成的“翻译腔”和“口语化”痕迹。
 
-【严禁使用的词汇（Negative Constraints）】
-❌ **绝对禁止**使用以下口语化连接词或废话（出现即违规）：
-   - "不难发现"、"由此可见"、"值得注意的是"、"众所周知"、"显而易见"、"毫无疑问"
-   - "综上所述"、"总而言之"、"也就是说"、"换句话说"
-❌ **绝对禁止**使用空洞的强调词：
+【核心人设与语态 (Persona & Tone)】
+- **学术客观性**：必须采用绝对客观的第三人称视角。严禁使用情感色彩浓厚的形容词（如“令人惊讶的”、“遗憾的是”）。所有论断必须基于数据或逻辑推演，而非主观臆断。
+- **被动语态主导**：为了强调客观性，请多用无灵主语或被动结构。
+  * *Bad*: "我们设计了一个模块来提取特征。"
+  * *Good*: "本文提出了一种特征提取模块，旨在..." 或 "通过引入自注意力机制，特征提取的鲁棒性得以增强。"
+
+【严禁使用的词汇 (Negative Constraints - Vocabulary)】
+❌ **连接词与废话（严禁出现）**：
+   - "不难发现"、"由此可见"、"值得注意的是"、"众所周知"、"显而易见"、"毫无疑问"、"毋庸置疑"。
+   - "综上所述"、"总而言之"、"也就是说"、"换句话说"、"一般来说"、"通常情况下"。
+❌ **空洞的强调词（严禁出现）**：
    - "非常重要"、"极具意义"、"关键作用"（必须直接描述具体的技术作用或量化指标）。
-❌ **绝对禁止**使用小学生式的列表连接词：
+   - "各种各样"、"丰富多彩"、"完美的"、"很好的"。
+❌ **小学生式的列表连接词（严禁出现）**：
    - "首先...其次...最后..."（除非是描述严谨的算法步骤序列，否则请用逻辑递进或空间结构代替）。
 
-【强制执行的写作规范】
+【严禁违规的格式规范（Negative Constraints - Formatting）】
+❌ **绝对禁止** 自主生成任何无用户明确指令的分点、编号列表（包括但不限于 1.、(1)、①、- 等所有层级符号）、子标题、小标题与内容层级拆分。全文本必须以连续、完整、逻辑连贯的自然大段落呈现，仅当用户在本轮指令中明确、精准指定需使用特定编号格式、分点规则或标题层级时，方可严格按照用户要求执行，否则一律禁用任何自主分点与标题拆分行为。
+❌ **绝对禁止** 为强行拆分内容设置不合理的段落换行，不得将完整的逻辑语义单元拆分为多个零散短句段落，所有段落划分必须符合中文学位论文的正式排版规范，以完整的逻辑语义段为唯一划分标准，彻底杜绝 AI 生成式的碎片化、无意义分段。
+
+【强制执行的写作规范 (Writing Standards)】
 1. **标点符号规范 (Strict Chinese Punctuation)**：
    - **全角优先**：正文中必须严格使用中文全角标点字符，包括：逗号（，）、句号（。）、括号（（））、冒号（：）、分号（；）。
    - **严禁**：在正文中出现英文半角逗号(,)或英文括号()，除非是在公式内部、代码片段或参考文献引用编号中。
-2. **零连接词逻辑（Implicit Cohesion）**：
+2. **零连接词逻辑 (Implicit Cohesion Strategy)**：
    - 高水平的学术写作依靠句与句之间的逻辑内在联系（因果、转折、递进）来衔接，而不是靠“因此”、“但是”这些显性词。
    - *Bad*: "首先使用了A方法，然后因为A方法效果不好，所以使用了B方法。"
    - *Good*: "鉴于A方法在处理稀疏数据时收敛困难，本文引入B策略以增强特征提取的鲁棒性。"
-3. **客观被动语态**：
-   - 多用“本文提出”、“实验结果表明”、“数据分析显示”。
-   - 少用或不用“我们发现”、“我想”。
-4. **具体化**：
+   - **要求**：请检查每一句话，如果删除连接词后逻辑依然通顺，则必须删除连接词。
+3. **句式多样性 (Sentence Structure Variety)**：
+   - **严禁**连续三句使用相同的句式开头（如连续使用“该方法...”）。
+   - 必须交替使用长句（复合句）和短句（强调句），以形成良好的阅读节奏。
+4. **具体化与量化 (Specificity)**：
    - 凡是涉及评价，必须带上限定条件。不要说“效果很好”，要说“在低信噪比环境下，Dice系数提升了3.5%”。
 
 【输出要求】
-请直接输出改写后的正文，**不要**包含“好的”、“根据您的要求”等任何对话性文字。
+请直接输出改写后的正文，**不要**包含“好的”、“根据您的要求”等任何对话性文字。保持内容的学术密度，不要为了凑字数而产生废话。
 `;
 
 const LOGIC_SKELETON_PROMPT = `
@@ -85,10 +100,10 @@ const LOGIC_SKELETON_PROMPT = `
   - 在设计骨架前，必须先明确：**这一小节在整章、整篇论文中处于什么位置？起什么作用？**
   - 如果是方法的“前奏”，则需“抛砖引玉”；如果是“核心”，则需“严丝合缝”地推导。
   - **逻辑架构设计**：你必须设计出**层层递进、环环相扣**的逻辑链条。上一段的结尾必须是下一段的伏笔，或者这一段是下一段的理论支撑。
-- **积木化构建**：
+- **积木化构建 (Modular Construction)**：
   - 必须严格使用下方的【通用逻辑词 (Moves)】作为**积木**来搭建骨架，确保学术规范性。不要自己创造奇怪的逻辑类型。
-- 不编造：不得凭空编造文献、实验结果。
-- 模板可学结构不可抄句：若提供 参考范文，只能学习其段落推进/语气/对比框架，禁止复用原句。
+- **学术诚信**：不编造具体数据或文献内容。
+- **参考范文的使用**：若提供参考范文，只能学习其段落推进/语气/对比框架（Structural Mimicry），禁止复用原句。
 - **关键词策略 (关键 - 离散组合搜索)**：
   - **核心逻辑**：搜索关键词不是连续的自然语言句子，而是**由“大方向 + 小方向 + 具体技术”组成的离散词组**。这是为了模拟最可能同时出现在目标论文标题/摘要中的高频词组合。
   - **组合公式 (2-3个词)**：
@@ -129,7 +144,7 @@ A1. Level-1 Moves（通用，任何领域可实例化）
 
 A2. Level-2 Slots（所有 Move 统一使用）
 每个 skeleton block 必须填这些槽（没有材料也要标 TODO）：
-- Claim：这一段要表达的主张（1句）
+- Claim：这一段要表达的主张（1句，例如：现有U-Net在处理边缘细节时存在模糊问题）
 - Evidence：需要的证据类型（reference/data/formula/figure/table/comparison）
 - Mechanism：为什么成立（原理/推导/直觉）
 - KeywordsZH：中文检索词（2组，每组2-3个离散词拼凑）
@@ -146,7 +161,7 @@ C) 你的输出：严格 JSON
           "block_id": "blk_1",
           "move": "必须来自 A1 Move 词表",
           "slots": {
-            "Claim": "本段核心主张 (e.g., 现有U-Net在处理边缘细节时存在模糊问题)",
+            "Claim": "本段核心主张",
             "Evidence": ["reference|data|formula|figure|table|comparison"],
             "KeywordsZH": ["CT 配准 刚性", "医学图像 配准 综述"], 
             "KeywordsEN": ["CT registration rigid", "medical image registration survey"]
@@ -552,6 +567,16 @@ export const polishDraftContent = async (
     const systemPrompt = `
     你是一名“学术论文逻辑润色专家”。你的任务是优化一段AI生成的初稿，使其逻辑更连贯、内容更充实，并修复格式问题。
 
+    【核心约束：字数控制 (Word Count Constraint)】
+    - **严禁字数爆炸**：润色后的内容长度不得超过原稿长度的 **140%**。
+    - 你的任务是“精炼与逻辑优化”，而不是无意义的扩写。
+
+    【核心约束：占位符保护 (Placeholder Preservation - CRITICAL)】
+    - **严禁删除图片/表格占位符**：必须完好无损地保留原文中所有的 \`[[FIG:描述]]\` 和 \`[[TBL:描述]]\` 标签。
+    - **严禁修改占位符位置**：它们是后续排版的锚点，绝对不能丢失。
+    - *正确示范*: 文本... \`[[FIG:流程图]]\` ...文本
+    - *错误示范*: (直接删除了FIG标签)
+
     【核心任务 1：深度逻辑重构 (Deep Logic Refinement - 仿照高水平范文)】
     请模仿高质量中文核心期刊的“分类-缺陷-改进”逻辑链条对文本进行重写，参考范式如下：
     1. **"总-分-演进"宏观结构**：
@@ -615,6 +640,10 @@ export const finalizeAcademicStyle = async (
 
     这是文章生成的最后一个环节（Final Check）。你的任务是进行最后的“去AI味”和“格式标准化”。
     
+    【核心约束】
+    1. **绝对保留占位符**：检查并确保 \`[[FIG:...]]\` 和 \`[[TBL:...]]\` 完好无损。
+    2. **字数约束**：不要大幅扩写，保持在原稿字数的 140% 以内。
+
     1. **再次检查语气**：确保没有“总而言之”、“综上所述”、“我们发现”等词汇。强制转换为客观被动语态。
     2. **检查符号规范**：确保行内公式使用 \`[[SYM:...]]\` 且不换行。独立公式使用 \`[[EQ:...]]\`。
     3. **标点强制检查**：正文必须是中文全角标点。
@@ -690,7 +719,7 @@ export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
     1. **复用 (Reuse)**: 检查下方的【全局参考文献库】。如果你想引用的内容（如同源文献）已经存在于库中，且只有当【已存文献】与你当前想引用的内容在**概念层级**上完全一致时，，**必须**直接复用其 ID。
        - 格式: \`[[REF:ID]]\` (例如 \`[[REF:12]]\`)。
     2. **新增占位 (New)**: 如果你想引用某篇经典文献或观点，但库里没有，请生成一个**关键词占位符**。
-       - 格式: \`[[REF:作者 年份 关键词]]\` (例如 \`[[REF:He 2016 ResNet]]\` 或 \`[[REF:Attention Is All You Need Transformer]]\`)。
+       - **Strict Format**: \`[[REF:KEYWORD_PLACEHOLDER: Author Year Topic]]\`.
        - **禁止**：严禁自己编造数字ID（如[99]），严禁生成虚假的完整引用格式。只生成关键词描述。
        - 系统后续会自动根据这些关键词去匹配或创建新的引用条目。
     **⚠️ 严禁滥用引用 ID (Strict Granularity Rule)**：
@@ -698,15 +727,13 @@ export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
     **举例说明（必须遵守）**：
     - **场景 1 (U-Net)**: 
       - 如果文中提到 "使用 U-Net 进行分割"，且全局库中有 *Ronneberger et al. U-Net...*，则**必须**复用该参考文献。
-      - 如果全局库中只有一本通用的《深度学习》教材，**绝对禁止**引用它来佐证 "U-Net" 的具体细节，必须新建引用 [[REF:Ronneberger U-Net...]]。
-      - 如果文中提到 "Attention U-Net"，**绝对禁止**引用原始 U-Net 的 ID，必须新建 "Attention U-Net" 的引用。
+      - 如果全局库中只有一本通用的《深度学习》教材，**绝对禁止**引用它来佐证 "U-Net" 的具体细节，必须新建引用 \`[[REF:KEYWORD_PLACEHOLDER: Ronneberger 2015 U-Net]]\`。
     - **场景 2 (L1/L2 Loss)**:
       - 如果 L1 Loss 和 L2 Loss 的定义出自同一篇综述文章，且该文章已在库中，则两者可以共用同一个 ID。
       - 如果文中讨论的是 "Focal Loss"，而库中只有 "Cross Entropy Loss" 的文献，**禁止**复用，必须新建。
-    
     **操作指令**:
     1. **复用**: 只有确认颗粒度匹配时，使用 \`[[REF:ID]]\` (如 [[REF:12]])。
-    2. **新增**: 如果库中没有匹配层级的文献，使用 \`[[REF:详细文献标题/描述]]\`。
+    2. **新增**: 如果库中没有匹配层级的文献，使用 \`[[REF:KEYWORD_PLACEHOLDER: 详细关键词]]\`。
     3. **多重引用**: 如果需要同时引用多个，请写成 \`[[REF:1]][[REF:2]]\`，**严禁**使用逗号合并如 \`[1,2]\`。
 
     【全局参考文献库 (Global References)】
@@ -813,15 +840,13 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
     **举例说明（必须遵守）**：
     - **场景 1 (U-Net)**: 
       - 如果文中提到 "使用 U-Net 进行分割"，且全局库中有 *Ronneberger et al. U-Net...*，则**必须**复用该 ID。
-      - 如果全局库中只有一本通用的《深度学习》教材，**绝对禁止**引用它来佐证 "U-Net" 的具体细节，必须新建引用 [[REF:Ronneberger U-Net...]]。
-      - 如果文中提到 "Attention U-Net"，**绝对禁止**引用原始 U-Net 的 ID，必须新建 "Attention U-Net" 的引用。
+      - 如果全局库中只有一本通用的《深度学习》教材，**绝对禁止**引用它来佐证 "U-Net" 的具体细节，必须新建引用 \`[[REF:KEYWORD_PLACEHOLDER: Ronneberger U-Net]]\`。
     - **场景 2 (L1/L2 Loss)**:
       - 如果 L1 Loss 和 L2 Loss 的定义出自同一篇综述文章，且该文章已在库中，则两者可以共用同一个 ID。
       - 如果文中讨论的是 "Focal Loss"，而库中只有 "Cross Entropy Loss" 的文献，**禁止**复用，必须新建。
-    
     **操作指令**:
     1. **复用**: 只有确认颗粒度匹配时，使用 \`[[REF:ID]]\` (如 [[REF:12]])。
-    2. **新增**: 如果库中没有匹配层级的文献，使用 \`[[REF:详细文献标题/描述]]\`。
+    2. **新增**: 如果库中没有匹配层级的文献，使用 \`[[REF:KEYWORD_PLACEHOLDER: 详细标题关键词]]\`。
     3. **多重引用**: 如果需要同时引用多个，请写成 \`[[REF:1]][[REF:2]]\`，**严禁**使用逗号合并如 \`[1,2]\`。
 
     【专业术语与翻译名词规范 (CRITICAL)】
@@ -871,6 +896,7 @@ interface PostProcessContext {
     globalTerms: TechnicalTerm[];
     settings: ApiSettings;
     onLog?: (msg: string) => void;
+    citationStyle?: CitationStyle; // NEW: Pass citation style for strict formatting
 }
 
 interface PostProcessResult {
@@ -952,7 +978,7 @@ const rewriteContentAI = async (text: string, instructions: string, settings: Ap
 };
 
 export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<PostProcessResult> => {
-   const { chapterId, allChapters, globalReferences, settings, onLog } = ctx;
+   const { chapterId, allChapters, globalReferences, settings, onLog, citationStyle } = ctx;
    
    // 1. Deep Clone & Flatten for Analysis
    let updatedChapters = JSON.parse(JSON.stringify(allChapters));
@@ -1192,9 +1218,15 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
             }
 
             // Case B: AI provided a description/title
+            // Check for KEYWORD_PLACEHOLDER from Quick Mode
+            // Format: [[REF:KEYWORD_PLACEHOLDER: Author Year Topic]]
             let description = "";
             if (pDesc) description = pDesc.trim();
-            else if (pId) description = pId; 
+            else if (pId) description = pId;
+            
+            if (description.startsWith("KEYWORD_PLACEHOLDER:")) {
+                description = description.replace("KEYWORD_PLACEHOLDER:", "").trim();
+            }
             
             if (!description) return match;
 
@@ -1234,56 +1266,6 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
 
    updatedChapters = finalUpdateRecursive(updatedChapters);
 
-   // --- PHASE 5: Reference Metadata Validation & Formatting (Strict GB/T 7714) ---
-   // MODIFIED: Skip strict formatting for refs without metadata (Quick Mode Refs)
-   if (onLog) onLog("Phase 5: 正在进行参考文献严格格式校验 (GB/T 7714)...");
-   
-   finalRefOrder.forEach(ref => {
-       if (ref.metadata) {
-           const md = ref.metadata;
-           // Format Authors: "Family, Given" -> "FAMILY G" style roughly or strict GB/T
-           // Simplified GB/T Author Format: First 3 authors + et al.
-           const formatAuthors = (authors: string[]) => {
-               // Assuming authors come as "Family, Given" or "Full Name"
-               const processed = authors.map(a => {
-                   // naive capitalization if needed, or keep as is from Crossref
-                   return a; 
-               });
-               if (processed.length > 3) {
-                   return `${processed.slice(0, 3).join(", ")}等`; // Chinese style et al.
-               }
-               return processed.join(", ");
-           };
-
-           const authorsStr = formatAuthors(md.authors);
-           let finalStr = "";
-           
-           if (md.type === 'journal-article' || md.journal) {
-                // [序号] 作者. 题名[J]. 刊名, 年, 卷(期): 起止页码.
-                finalStr = `${authorsStr}. ${md.title}[J]. ${md.journal}, ${md.year}`;
-                if (md.volume) finalStr += `, ${md.volume}`;
-                if (md.issue) finalStr += `(${md.issue})`;
-                if (md.pages) {
-                    finalStr += `: ${md.pages}.`;
-                } else {
-                    finalStr += `.`;
-                    if (onLog) onLog(`⚠️ 警告: 文献 [${ref.id}] "${md.title.substring(0,20)}..." 缺少页码信息。`);
-                }
-           } else {
-                // Default fallback
-                finalStr = `${authorsStr}. ${md.title}. ${md.year}.`;
-           }
-           
-           // Update description strictly
-           ref.description = finalStr;
-       } else {
-           // FOR QUICK MODE REFS:
-           // Do not overwrite description if metadata is missing. Just log.
-           if (onLog) onLog(`⚠️ 跳过格式化: 文献 [${ref.id}] 为快速模式生成，保留原始描述。`);
-       }
-   });
-
-
    // Extract new global terms list for UI display
    const finalGlobalTerms = [...ctx.globalTerms];
    localTermsFound.forEach(lt => {
@@ -1299,6 +1281,229 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
        updatedChapters: updatedChapters
    };
 };
+
+// Helper: Extract contexts for references
+const extractReferenceContexts = (chapters: Chapter[]): Map<number, string> => {
+    const contexts = new Map<number, string>();
+    const flatten = (list: Chapter[]): Chapter[] => {
+        let res: Chapter[] = [];
+        list.forEach(c => {
+            res.push(c);
+            if (c.subsections) res = res.concat(flatten(c.subsections));
+        });
+        return res;
+    };
+    
+    const allNodes = flatten(chapters);
+    
+    allNodes.forEach(node => {
+        if (!node.content) return;
+        
+        // Find all [[REF:x]]
+        const regex = /\[\[REF:(\d+)\]\]/g;
+        let match;
+        while ((match = regex.exec(node.content)) !== null) {
+            const id = parseInt(match[1]);
+            if (!isNaN(id) && !contexts.has(id)) {
+                // Extract snippet around the citation
+                const start = Math.max(0, match.index - 100);
+                const end = Math.min(node.content.length, match.index + 100);
+                const snippet = node.content.slice(start, end).replace(/\s+/g, ' ');
+                contexts.set(id, `[Chapter: ${node.title}] Context: "...${snippet}..."`);
+            }
+        }
+    });
+    
+    return contexts;
+};
+
+// --- NEW FUNCTION: Standardize References Only (Enrichment + AI Formatting) ---
+export const standardizeReferencesGlobal = async (
+    references: Reference[],
+    chapters: Chapter[], // Added: Need chapters to find context
+    settings: ApiSettings,
+    citationStyle: CitationStyle,
+    onLog?: (msg: string) => void
+): Promise<Reference[]> => {
+    const updatedRefs = [...references];
+
+    if (onLog) onLog(`Phase 1: 全文扫描引用上下文 (Context Gathering)...`);
+    const contextMap = extractReferenceContexts(chapters);
+
+    // Filter refs that need enrichment (missing metadata)
+    const refsToEnrich = updatedRefs.filter(r => 
+        !r.metadata || !r.metadata.year || !r.metadata.authors || r.metadata.authors.length === 0
+    );
+
+    if (refsToEnrich.length === 0) {
+        if (onLog) onLog(`所有参考文献元数据已完整，跳过搜索步骤。`);
+    } else {
+        if (onLog) onLog(`Phase 2: AI 智能分析 ${refsToEnrich.length} 条待修复引用的搜索策略...`);
+        
+        // Construct payload for AI Planner
+        const plannerPayload = refsToEnrich.map(r => ({
+            id: r.id,
+            raw_text: r.description,
+            context: contextMap.get(r.id) || "（无正文引用上下文，可能是孤立条目）"
+        }));
+
+        // AI Step: Generate Search Queries based on Context
+        const planSystemPrompt = `
+        You are a Reference Search Planner.
+        Analyze the raw citation text and its context. 
+        Determine if the entry is a specific paper TITLE or vague keywords.
+
+        Rules:
+        1. If 'raw_text' looks like a complete paper title (e.g. "Deep Residual Learning for Image Recognition"), mark type as 'title'.
+        2. If 'raw_text' is vague (e.g. "He et al. ResNet", "Attention Mechanism"), mark type as 'keywords'.
+        3. **Query Formulation**:
+           - For 'title': Return the raw text cleaned up.
+           - For 'keywords': Combine context + keywords to form a specific search query to FIND the exact paper title first.
+        4. **Matching**: If the raw text is just a placeholder (e.g. "[[REF:ResNet]]"), infer the seminal paper.
+
+        Output JSON:
+        {
+            "queries": [
+                { "id": 123, "type": "title", "search_query": "Deep Residual Learning for Image Recognition" },
+                { "id": 124, "type": "keywords", "search_query": "U-Net convolutional networks for biomedical image segmentation" }
+            ]
+        }
+        `;
+
+        let searchPlans: {id: number, type: 'title'|'keywords', search_query: string}[] = [];
+        try {
+            const planText = await generateContentUnified(settings, {
+                systemPrompt: planSystemPrompt,
+                userPrompt: JSON.stringify(plannerPayload),
+                jsonMode: true
+            });
+            const parsed = JSON.parse(cleanJsonText(planText));
+            if (parsed.queries) searchPlans = parsed.queries;
+        } catch (e) {
+            console.error("AI Planning failed", e);
+            // Fallback: assume everything is a title search
+            searchPlans = refsToEnrich.map(r => ({ id: r.id, type: 'title', search_query: r.description }));
+        }
+
+        // Execute Search (Phase 3)
+        if (onLog) onLog(`Phase 3: 启动多源全网检索 (Enrichment)...`);
+        
+        // Process sequentially to be polite to APIs
+        for (const plan of searchPlans) {
+            const ref = updatedRefs.find(r => r.id === plan.id);
+            if (!ref) continue;
+
+            let targetTitle = plan.search_query.replace(/^\[\d+\]/, '').trim();
+            
+            // Logic for 'keywords': We need to find the TITLE first
+            if (plan.type === 'keywords') {
+                 if (onLog) onLog(`  - [${ref.id}] 模糊匹配: 正在确认 "${targetTitle.slice(0, 20)}..." 的具体论文...`);
+                 try {
+                     // First generic search to find the paper
+                     const candidates = await searchAcademicPapers(targetTitle, 'semantic_scholar', settings.searchApiKey); // S2 is good for this
+                     if (candidates && candidates.length > 0) {
+                         targetTitle = candidates[0].title;
+                         if (onLog) onLog(`    -> 锁定目标论文: "${targetTitle.slice(0, 30)}..."`);
+                     } else {
+                         if (onLog) onLog(`    ⚠️ 模糊匹配失败，将尝试直接使用原词搜索。`);
+                     }
+                 } catch (e) {
+                     console.warn("Keyword resolution failed", e);
+                 }
+            }
+
+            if (targetTitle.length < 3) continue;
+
+            if (onLog) onLog(`  - [${ref.id}] 全网搜证 (Target: "${targetTitle.slice(0, 20)}...")...`);
+            
+            try {
+                // NEW: Use the multi-source aggregator with STRICT MODE
+                // We pass 'true' for strictTitleMatch because we identified the target title above
+                const mergedMeta = await enrichReferenceMetadata(targetTitle, settings, true);
+                
+                if (mergedMeta) {
+                    ref.metadata = mergedMeta;
+                    if (onLog) onLog(`    ✓ 成功聚合元数据 (Title: ${mergedMeta.title.slice(0,30)}...)`);
+                } else {
+                    // Fallback Marking
+                    if (!ref.description.includes("[需修复")) {
+                        ref.description += " [需修复: 未找到匹配文献]";
+                    }
+                    if (onLog) onLog(`    ⚠️ 全网检索未命中 (Strict Match Failed)，已标记为需修复。`);
+                }
+            } catch (e) {
+                console.error(`Search failed for ref ${ref.id}`, e);
+            }
+        }
+    }
+
+    // 2. AI Formatting Phase (Rendering)
+    if (onLog) onLog(`Phase 4: 发送融合元数据至 AI，生成标准 ${citationStyle} 格式...`);
+    
+    // Construct payload: ID + Metadata (Source of Truth) + Original Text (Fallback)
+    const payload = updatedRefs.map(r => ({
+        id: r.id,
+        original_text: r.description,
+        metadata: r.metadata && r.metadata.year ? r.metadata : "MISSING_METADATA" 
+    }));
+
+    const systemPrompt = `
+    You are a Bibliography Formatting Agent. 
+    Your task is to take a list of references and format them STRICTLY according to the citation style: "${citationStyle}".
+
+    【Input Data】
+    A list of objects containing:
+    - id: The reference ID.
+    - metadata: The structured CSL-like metadata (Title, Authors, Year, Journal, etc.). THIS IS THE SOURCE OF TRUTH.
+    - original_text: The fallback text if metadata is missing.
+
+    【Formatting Rules for ${citationStyle}】
+    1. **Source of Truth**: Always prefer 'metadata' over 'original_text' to construct the citation.
+    2. **Missing Metadata**: If metadata is "MISSING_METADATA", try to format 'original_text' as best as you can to match the style.
+    3. **Language Detection**: 
+       - If the paper is Chinese (judged by title/journal), use Chinese punctuation (e.g., "等" instead of "et al.", "全角逗号").
+       - If English, use English punctuation.
+    4. **GB/T 7714 Specifics**:
+       - Authors: Uppercase surnames if English (e.g., "SMITH J"). Show first 3 authors, then ", et al." or ", 等".
+       - Title: Normal case.
+       - Type Mark: [J] for journal, [C] for conference, [M] for book. Guess based on 'venue' field.
+       - Format: Author. Title[J]. Journal, Year, Volume(Issue): Pages.
+    5. **Strict JSON Output**:
+       Return a JSON object: { "formatted_references": [ { "id": 1, "text": "The complete formatted citation string" } ] }
+
+    Process the references now.
+    `;
+
+    try {
+        const text = await generateContentUnified(settings, {
+            systemPrompt,
+            userPrompt: JSON.stringify(payload),
+            jsonMode: true
+        });
+        
+        const result = JSON.parse(cleanJsonText(text));
+        
+        if (result.formatted_references && Array.isArray(result.formatted_references)) {
+            let updatedCount = 0;
+            result.formatted_references.forEach((item: any) => {
+                const target = updatedRefs.find(r => r.id === item.id);
+                if (target && item.text) {
+                    target.description = item.text;
+                    updatedCount++;
+                }
+            });
+            if (onLog) onLog(`✅ 格式化完成，已更新 ${updatedCount} 条参考文献。`);
+        } else {
+            throw new Error("Invalid AI response format");
+        }
+
+    } catch (e) {
+        if (onLog) onLog(`❌ AI 格式化失败: ${e instanceof Error ? e.message : String(e)}`);
+        // On error, we keep enriched metadata but maybe descriptions are not perfectly formatted yet.
+    }
+
+    return updatedRefs;
+}
 
 function escapeRegExp(string: string) {
   if (typeof string !== 'string') return "";

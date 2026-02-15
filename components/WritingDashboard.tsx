@@ -1,8 +1,9 @@
 
+
 import React, { useState, useRef, useEffect } from 'react';
-import { ThesisStructure, Chapter, FormatRules, Reference, AgentLog, ApiSettings, SectionPlan, SearchProvider, SearchResult, SearchHistoryItem, CitationStyle, SkeletonBlock } from '../types';
-import { writeSingleSection, writeSingleSectionQuickMode, runPostProcessingAgents, generateSkeletonPlan, polishDraftContent, finalizeAcademicStyle, filterSearchResultsAI } from '../services/geminiService';
-import { searchAcademicPapers, fetchDetailedRefMetadata } from '../services/searchService';
+import { ThesisStructure, Chapter, FormatRules, Reference, AgentLog, ApiSettings, SectionPlan, SearchProvider, SearchResult, SearchHistoryItem, CitationStyle, SkeletonBlock, CitationStrategy } from '../types';
+import { writeSingleSection, writeSingleSectionQuickMode, runPostProcessingAgents, generateSkeletonPlan, polishDraftContent, finalizeAcademicStyle, filterSearchResultsAI, standardizeReferencesGlobal } from '../services/geminiService';
+import { searchAcademicPapers, fetchDetailedRefMetadata, enrichReferenceMetadata } from '../services/searchService';
 import { generateContextEntry, formatCitation } from '../utils/citationFormatter';
 import SearchHistoryModal from './SearchHistoryModal';
 
@@ -59,17 +60,10 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
   const [isPostProcessing, setIsPostProcessing] = useState(false);
   const [isAddingRef, setIsAddingRef] = useState(false);
   
-  // User Inputs
-  const [instructions, setInstructions] = useState<Record<string, string>>({}); 
-  const [refTemplates, setRefTemplates] = useState<Record<string, string>>({}); 
-  const [targetWordCounts, setTargetWordCounts] = useState<Record<string, number>>({}); // node_id -> word count constraint
-  
   const logsEndRef = useRef<HTMLDivElement>(null);
   
   // Advanced Mode States
   const [advancedMode, setAdvancedMode] = useState(false);
-  const [plans, setPlans] = useState<Record<string, SectionPlan>>({});
-  const [referenceInputs, setReferenceInputs] = useState<Record<string, string>>({}); // block_id -> context
   
   // Search UI States - Modified to use global settings or default
   // Note: We access apiSettings directly. If setApiSettings is missing, it's read-only.
@@ -87,6 +81,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
   
   // Auto Pilot State
   const [isAutoPiloting, setIsAutoPiloting] = useState(false);
+  const [autoPilotScope, setAutoPilotScope] = useState<'section' | 'chapter'>('section'); // New granularity
 
   // Global Terms Registry (In-memory for session)
   const [globalTerms, setGlobalTerms] = useState<any[]>([]);
@@ -100,6 +95,35 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [agentLogs]);
+
+  // Helper to get AI context from Chapter Metadata
+  const getAIContext = (ch: Chapter) => ch.metadata?.aiContext || {};
+
+  // Helper to update AI context in thesis structure (Persistence)
+  const updateChapterAIContext = (chapterId: string, contextUpdate: Partial<NonNullable<Chapter['metadata']>['aiContext']>) => {
+      setThesis(prev => {
+          const updateRecursive = (list: Chapter[]): Chapter[] => {
+              return list.map(ch => {
+                  if (ch.id === chapterId) {
+                      const existingMeta = ch.metadata || {};
+                      const existingContext = existingMeta.aiContext || {};
+                      return {
+                          ...ch,
+                          metadata: {
+                              ...existingMeta,
+                              aiContext: { ...existingContext, ...contextUpdate }
+                          }
+                      };
+                  }
+                  if (ch.subsections) {
+                      return { ...ch, subsections: updateRecursive(ch.subsections) };
+                  }
+                  return ch;
+              });
+          };
+          return { ...prev, chapters: updateRecursive(prev.chapters) };
+      });
+  };
 
   // Helper to update global search settings
   const handleUpdateSearchSettings = (provider?: string, key?: string) => {
@@ -166,10 +190,12 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       }
   };
 
-  const addCitationToContext = async (blockId: string, result: SearchResult) => {
+  const addCitationToContext = async (blockId: string, nodeId: string, result: SearchResult) => {
       if (isAddingRef) return;
       setIsAddingRef(true);
-      const existingText = referenceInputs[blockId] || "";
+      
+      const currentCh = nodes.find(n => n.chapter.id === nodeId)?.chapter;
+      const existingText = getAIContext(currentCh!).referenceInput || "";
       
       // 1. Check if strictly homologous (same source title) in global references
       let existingRef = references.find(r => 
@@ -211,162 +237,240 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       // 3. Update the Context Textbox with the entry (showing ID for reuse)
       const citationEntry = generateContextEntry(result, citationStyle, existingRef.id);
 
-      setReferenceInputs(prev => ({
-          ...prev,
-          [blockId]: existingText + citationEntry
-      }));
+      // Use Persistent Store
+      updateChapterAIContext(nodeId, { referenceInput: existingText + citationEntry });
       setIsAddingRef(false);
   };
 
-  // --- AUTO PILOT HANDLER ---
-  const handleAutoPilotChapter = async () => {
+  // --- STANDARD REFERENCE FIXER (UPDATED to use new dedicated function) ---
+  const handleFixReferences = async () => {
+      if (isPostProcessing) return;
+      setIsPostProcessing(true);
+      addLog('Reference', '开始执行“智能参考文献规范化”流程...', 'processing');
+      // Updated to pass thesis.chapters for context
+      addLog('Reference', '1. 全局检查：扫描正文引用上下文 & 缺失元数据...', 'processing');
+      
+      try {
+          const updatedRefs = await standardizeReferencesGlobal(
+              references,
+              thesis.chapters, // Pass all chapters to find context
+              apiSettings,
+              citationStyle,
+              (msg) => addLog('Reference', msg, 'processing')
+          );
+        
+        setReferences(updatedRefs);
+        addLog('Reference', '参考文献规范化完成，已更新描述与格式。', 'success');
+      } catch (e) {
+          addLog('Reference', `规范化失败: ${e}`, 'error');
+      } finally {
+          setIsPostProcessing(false);
+      }
+  };
+
+  // --- AUTO PILOT HANDLER (Granular & Persistent) ---
+  const handleAutoPilot = async (targetNodeId?: string) => {
       if (!selectedChapter || !apiSettings.apiKey) {
           alert("请先配置 API Key");
           return;
       }
       
       setIsAutoPiloting(true);
-      addLog('Supervisor', `启动全章自动化探索与撰写流程...`, 'processing');
-
-      // Filter nodes: Only process L2/L3 nodes (leaf nodes effectively) that haven't been written
-      // OR prioritize nodes where user has added instructions/templates.
-      // For simplicity in this robust "Batch" mode, we process all leaf nodes in order.
-      const leafNodes = nodes.filter(n => (n.chapter.subsections === undefined || n.chapter.subsections.length === 0));
       
+      // LOGIC FIX: Resolve ambiguity for "Single Section" logic
+      // If targetNodeId is present (clicked on card), use it.
+      // If undefined (clicked on header):
+      //    - If scope is 'chapter', use all leaf nodes.
+      //    - If scope is 'section', find the FIRST pending/unwritten node in the chapter and run on that.
+      
+      let targetNodes: FlattenedNode[] = [];
+      const leafNodes = nodes.filter(n => (n.chapter.subsections === undefined || n.chapter.subsections.length === 0));
+
+      if (targetNodeId) {
+          const n = nodes.find(x => x.chapter.id === targetNodeId);
+          if (n) targetNodes = [n];
+      } else {
+          if (autoPilotScope === 'chapter') {
+              targetNodes = leafNodes;
+              addLog('Supervisor', `启动全章 Auto-Pilot，共 ${targetNodes.length} 个任务...`, 'processing');
+          } else {
+              // Find first pending
+              const firstPending = leafNodes.find(n => !n.chapter.content || n.chapter.content.length < 50);
+              if (firstPending) {
+                  targetNodes = [firstPending];
+                  addLog('Supervisor', `启动单节 Auto-Pilot (自动定位到: ${firstPending.label} ${firstPending.chapter.title})...`, 'processing');
+              } else {
+                  // Fallback to first one if all done
+                  if (leafNodes.length > 0) {
+                      targetNodes = [leafNodes[0]];
+                      addLog('Supervisor', `所有章节似已完成。自动定位到第一节: ${leafNodes[0].label}`, 'processing');
+                  }
+              }
+          }
+      }
+      
+      if (targetNodes.length === 0) {
+          addLog('Supervisor', `未找到可执行的章节目标`, 'warning');
+          setIsAutoPiloting(false);
+          return;
+      }
+
       try {
           // Iterate sequentially
-          for (const node of leafNodes) {
+          for (const node of targetNodes) {
               const nodeId = node.chapter.id;
               
               addLog('Planner', `[Auto-Pilot] 正在处理: ${node.label} ${node.chapter.title}`, 'processing');
               setLoadingNodes(prev => ({ ...prev, [nodeId]: true }));
 
-              // 1. Generate Skeleton
-              // Use existing inputs if any, otherwise default
-              const response = await generateSkeletonPlan(
-                  thesis.title, 
-                  node.chapter,
-                  selectedChapter?.chatHistory, 
-                  refTemplates[nodeId],         
-                  instructions[nodeId],         
-                  apiSettings
-              );
+              // 1. Generate Skeleton (If not exists)
+              let plan = getAIContext(node.chapter).skeletonPlan;
+              
+              if (!plan) {
+                  const response = await generateSkeletonPlan(
+                      thesis.title, 
+                      node.chapter,
+                      selectedChapter?.chatHistory, 
+                      getAIContext(node.chapter).refTemplate,         
+                      getAIContext(node.chapter).userInstruction,         
+                      apiSettings
+                  );
 
-              if (!response.section_plans || response.section_plans.length === 0) {
-                   addLog('Planner', `[Auto-Pilot] 骨架生成失败，跳过此节`, 'error');
-                   setLoadingNodes(prev => ({ ...prev, [nodeId]: false }));
-                   continue;
+                  if (!response.section_plans || response.section_plans.length === 0) {
+                       addLog('Planner', `[Auto-Pilot] 骨架生成失败，跳过此节`, 'error');
+                       setLoadingNodes(prev => ({ ...prev, [nodeId]: false }));
+                       continue;
+                  }
+
+                  const rawPlan = response.section_plans[0];
+                  // Unique Block IDs
+                  const uniqueBlocks = rawPlan.skeleton_blocks.map((b, idx) => ({
+                     ...b,
+                     block_id: `${nodeId}_blk_${idx + 1}`
+                  }));
+                  
+                  plan = { ...rawPlan, skeleton_blocks: uniqueBlocks };
+                  
+                  // PERSISTENCE FIX: Save skeleton immediately
+                  updateChapterAIContext(nodeId, { skeletonPlan: plan });
+                  
+                  // Wait for state update (simulate)
+                  await new Promise(r => setTimeout(r, 100));
               }
 
-              const plan = response.section_plans[0];
-              // Unique Block IDs
-              const uniqueBlocks = plan.skeleton_blocks.map((b, idx) => ({
-                 ...b,
-                 block_id: `${nodeId}_blk_${idx + 1}`
-              }));
-              
-              // Store plan in state (visual feedback)
-              setPlans(prev => ({ ...prev, [nodeId]: { ...plan, skeleton_blocks: uniqueBlocks } }));
-
               // 2. Search & Filter & Context Assembly
-              let combinedContext = "";
+              let combinedContext = getAIContext(node.chapter).referenceInput || "";
 
-              for (const block of uniqueBlocks) {
-                  // Decision: To search or not?
-                  // Heuristic: If KeywordsZH exist, try search.
-                  const shouldSearch = block.slots.KeywordsZH && block.slots.KeywordsZH.length > 0;
-
-                  if (shouldSearch) {
-                       const query = block.slots.KeywordsZH![0]; // Use first recommended query set
-                       addLog('Searcher', `[Auto-Pilot] 正在多源检索逻辑块 "${block.slots.Claim.slice(0,15)}...": ${query}`, 'processing');
-                       
-                       // STRATEGY: Call ALL available APIs in parallel
-                       // 1. Semantic Scholar (Free or Key)
-                       // 2. OpenAlex (Free)
-                       // 3. ArXiv (Free)
-                       // 4. Crossref (Free)
-                       // 5. Serper (Only if explicitly enabled via key in current settings?) -> Let's assume user wants broad coverage.
-                       //    If ApiSettings has a valid 'serper' key (hard to know if the key is serper or S2 if they share one field, 
-                       //    but user "selected" provider in UI. 
-                       //    To be safe and robust: We always try the FREE/Public ones.
-                       //    We try Semantic Scholar (works without key too).
-                       //    We SKIP Serper unless it's the currently selected provider with a key, to avoid auth errors.
-                       
-                       const providersToTry: SearchProvider[] = ['open_alex', 'arxiv', 'crossref', 'semantic_scholar'];
-                       
-                       // If current setting is serper and key exists, try it too.
-                       if (searchProvider === 'serper' && searchApiKey) {
-                           providersToTry.push('serper');
-                       }
-
-                       try {
-                           // Parallel Fetch
-                           const resultsPromises = providersToTry.map(p => {
-                               // Use key only if provider matches current settings
-                               const keyToUse = (p === searchProvider || (p === 'semantic_scholar' && searchProvider === 'semantic_scholar')) ? searchApiKey : undefined;
-                               return searchAcademicPapers(query, p, keyToUse).catch(e => {
-                                   console.warn(`Provider ${p} failed`, e);
-                                   return [] as SearchResult[];
-                               });
-                           });
-
-                           const resultsArrays = await Promise.all(resultsPromises);
-                           let aggregatedResults = resultsArrays.flat();
+              for (const block of plan.skeleton_blocks) {
+                  // Strategy Check: Auto-Pilot defaults to 'search_new' if not set
+                  const strategy = block.citation_strategy || 'search_new';
+                  
+                  if (strategy === 'search_new') {
+                       // Heuristic: If KeywordsZH exist, try search.
+                       const shouldSearch = block.slots.KeywordsZH && block.slots.KeywordsZH.length > 0;
+    
+                       if (shouldSearch) {
+                           const query = block.slots.KeywordsZH![0]; // Use first recommended query set
+                           addLog('Searcher', `[Auto-Pilot] 正在多源检索逻辑块 "${block.slots.Claim.slice(0,15)}...": ${query}`, 'processing');
                            
-                           // Deduplicate (Simple title match)
-                           const seenTitles = new Set();
-                           aggregatedResults = aggregatedResults.filter(r => {
-                               const normTitle = r.title.toLowerCase().replace(/\s+/g, '');
-                               if (seenTitles.has(normTitle)) return false;
-                               seenTitles.add(normTitle);
-                               return true;
-                           });
-
-                           if (aggregatedResults.length > 0) {
-                               addLog('Searcher', `[Auto-Pilot] 汇总检索到 ${aggregatedResults.length} 篇文献，正在进行 AI 智能筛选...`, 'processing');
-                               
-                               // 3. AI Filter
-                               const selectedIds = await filterSearchResultsAI(block.slots.Claim, aggregatedResults, apiSettings);
-                               
-                               if (selectedIds.length > 0) {
-                                   addLog('Searcher', `[Auto-Pilot] AI 选中 ${selectedIds.length} 篇高相关文献`, 'success');
-                                   
-                                   const selectedPapers = aggregatedResults.filter(r => selectedIds.includes(r.id));
-                                   
-                                   // Add to Global Refs & Context
-                                   for (const paper of selectedPapers) {
-                                       // Check/Add to Global
-                                       let existingRef = references.find(r => 
-                                            r.description.includes(paper.title) || paper.title.includes(r.description)
-                                       );
-                                       if (!existingRef) {
-                                            // Quick format (skip detailed crossref for speed in loop)
-                                            const formattedDesc = formatCitation(paper, citationStyle);
-                                            const newId = references.length > 0 ? Math.max(...references.map(r => r.id)) + 1 : 1;
-                                            const newRef: Reference = {
-                                                id: newId,
-                                                description: formattedDesc,
-                                                metadata: { // Basic metadata
-                                                    title: paper.title,
-                                                    authors: paper.authors,
-                                                    year: paper.year,
-                                                    journal: paper.venue
-                                                }
-                                            };
-                                            // NOTE: references state inside a loop won't update immediately.
-                                            // We append context manually.
-                                            combinedContext += `[Ref Candidates] Title: ${paper.title}. Abstract: ${paper.abstract}\n`;
-                                       } else {
-                                            combinedContext += `[Ref Existing ID:${existingRef.id}] Title: ${paper.title}\n`;
-                                       }
-                                   }
-                               } else {
-                                   addLog('Searcher', `[Auto-Pilot] AI 判定无相关文献，跳过引用`, 'warning');
-                               }
+                           const providersToTry: SearchProvider[] = ['open_alex', 'arxiv', 'crossref', 'semantic_scholar'];
+                           
+                           if (searchProvider === 'serper' && searchApiKey) {
+                               providersToTry.push('serper');
                            }
-                       } catch (e) {
-                           console.error(e);
-                       }
+    
+                           try {
+                               // Parallel Fetch
+                               const resultsPromises = providersToTry.map(p => {
+                                   const keyToUse = (p === searchProvider || (p === 'semantic_scholar' && searchProvider === 'semantic_scholar')) ? searchApiKey : undefined;
+                                   return searchAcademicPapers(query, p, keyToUse).catch(e => {
+                                       console.warn(`Provider ${p} failed`, e);
+                                       return [] as SearchResult[];
+                                   });
+                               });
+    
+                               const resultsArrays = await Promise.all(resultsPromises);
+                               let aggregatedResults = resultsArrays.flat();
+                               
+                               // Deduplicate
+                               const seenTitles = new Set();
+                               aggregatedResults = aggregatedResults.filter(r => {
+                                   const normTitle = r.title.toLowerCase().replace(/\s+/g, '');
+                                   if (seenTitles.has(normTitle)) return false;
+                                   seenTitles.add(normTitle);
+                                   return true;
+                               });
+    
+                               if (aggregatedResults.length > 0) {
+                                   addLog('Searcher', `[Auto-Pilot] 汇总检索到 ${aggregatedResults.length} 篇文献，正在进行 AI 智能筛选...`, 'processing');
+                                   
+                                   // PERSISTENCE FIX: Save to Search History
+                                   setSearchHistory(prev => [...prev, {
+                                        id: Date.now().toString() + Math.random(),
+                                        timestamp: Date.now(),
+                                        query: query,
+                                        provider: 'open_alex', // Approximation since we mixed providers
+                                        results: aggregatedResults,
+                                        blockId: block.block_id
+                                   }]);
+
+                                   const selectedIds = await filterSearchResultsAI(block.slots.Claim, aggregatedResults, apiSettings);
+                                   
+                                   if (selectedIds.length > 0) {
+                                       addLog('Searcher', `[Auto-Pilot] AI 选中 ${selectedIds.length} 篇高相关文献`, 'success');
+                                       
+                                       const selectedPapers = aggregatedResults.filter(r => selectedIds.includes(r.id));
+                                       
+                                       for (const paper of selectedPapers) {
+                                           // Check/Add to Global
+                                           let existingRef = references.find(r => 
+                                                r.description.includes(paper.title) || paper.title.includes(r.description)
+                                           );
+                                           
+                                           // --- NEW: Strict Metadata Enrichment for Auto-Pilot ---
+                                           if (!existingRef) {
+                                                // We found a new paper. We must enrich it to ensure perfect metadata.
+                                                addLog('Reference', `[Auto-Pilot] 正在全网验证并补全元数据: "${paper.title.slice(0,20)}..."`, 'processing');
+                                                
+                                                // Use Strict Mode (True) because we know the title from the selected paper
+                                                const perfectMeta = await enrichReferenceMetadata(paper.title, apiSettings, true);
+                                                
+                                                // Quick format
+                                                const formattedDesc = formatCitation(paper, citationStyle);
+                                                const newId = references.length > 0 ? Math.max(...references.map(r => r.id)) + 1 : 1;
+                                                
+                                                const newRef: Reference = {
+                                                    id: newId,
+                                                    description: formattedDesc,
+                                                    // Prefer perfect metadata if found, otherwise fallback to search result
+                                                    metadata: perfectMeta || { 
+                                                        title: paper.title,
+                                                        authors: paper.authors,
+                                                        year: paper.year,
+                                                        journal: paper.venue
+                                                    }
+                                                };
+                                                setReferences(prev => [...prev, newRef]);
+                                                // Append to context
+                                                combinedContext += generateContextEntry(paper, citationStyle, newId);
+                                           } else {
+                                                combinedContext += `[Ref Existing ID:${existingRef.id}] Title: ${paper.title}\n`;
+                                           }
+                                       }
+                                       // PERSISTENCE FIX: Save accumulated context
+                                       updateChapterAIContext(nodeId, { referenceInput: combinedContext });
+
+                                   } else {
+                                       addLog('Searcher', `[Auto-Pilot] AI 判定无相关文献，跳过引用`, 'warning');
+                                   }
+                               }
+                           } catch (e) {
+                               console.error(e);
+                           }
+                      }
+                  } else if (strategy === 'use_existing') {
+                       // Logic handled in prompt instructions to use global refs
+                       addLog('Searcher', `[Auto-Pilot] 策略设为“引用已有”，跳过搜索`, 'processing');
                   }
               }
 
@@ -382,22 +486,23 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
               if (combinedContext) {
                   constructedInstruction += `\n【自动检索到的相关文献素材 (Global Search)】\n${combinedContext}\n请根据Claim合理选用，若素材不足则进行理论推演。`;
               }
-              if (instructions[nodeId]) {
-                  constructedInstruction += `\n【用户额外指令】\n${instructions[nodeId]}`;
+              const userInst = getAIContext(node.chapter).userInstruction;
+              if (userInst) {
+                  constructedInstruction += `\n【用户额外指令】\n${userInst}`;
               }
 
-              // Draft (Using Advanced Mode Writer for Auto-Pilot as it uses Search Context)
+              // Draft
               let content = await writeSingleSection({
                 thesisTitle: thesis.title,
                 chapterLevel1: selectedChapter,
                 targetSection: node.chapter,
                 userInstructions: constructedInstruction,
                 formatRules,
-                globalRefs: references, // Note: Stale references might be an issue if we added new ones. Auto-Pilot relies on post-process to fix IDs.
+                globalRefs: references, 
                 settings: apiSettings,
                 discussionHistory: selectedChapter.chatHistory, 
                 fullChapterTree: thesis.chapters,
-                targetWordCount: targetWordCounts[nodeId] || 800,
+                targetWordCount: getAIContext(node.chapter).targetWordCount || 800,
                 chapterIndex: node.chapterIndex
               });
 
@@ -419,7 +524,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
               await new Promise(r => setTimeout(r, 1000)); 
           }
           
-          addLog('Supervisor', `🎉 全章自动化撰写流程结束！请进行人工审阅或点击“完成本章”进行最终校验。`, 'success');
+          addLog('Supervisor', `🎉 Auto-Pilot 流程结束！`, 'success');
           
       } catch (e) {
           addLog('Supervisor', `Auto-Pilot 异常中断: ${e}`, 'error');
@@ -439,8 +544,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
              thesis.title, 
              node.chapter,
              selectedChapter?.chatHistory, 
-             refTemplates[nodeId],         
-             instructions[nodeId],         
+             getAIContext(node.chapter).refTemplate,         
+             getAIContext(node.chapter).userInstruction,         
              apiSettings
          );
 
@@ -452,10 +557,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                  block_id: `${nodeId}_blk_${idx + 1}`
              }));
              
-             setPlans(prev => ({ 
-                 ...prev, 
-                 [nodeId]: { ...plan, skeleton_blocks: uniqueBlocks } 
-             }));
+             // Update Persistence
+             updateChapterAIContext(nodeId, { skeletonPlan: { ...plan, skeleton_blocks: uniqueBlocks } });
              addLog('Planner', `✅ 骨架提取成功，生成 ${uniqueBlocks.length} 个逻辑块`, 'success');
          } else {
              throw new Error("API 返回了空计划");
@@ -469,42 +572,55 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
   };
 
   const handleUpdateBlockSlot = (nodeId: string, blockIndex: number, field: string, value: string) => {
-      setPlans(prev => {
-          const plan = prev[nodeId];
-          if (!plan) return prev;
-          const newBlocks = [...plan.skeleton_blocks];
-          newBlocks[blockIndex] = {
-              ...newBlocks[blockIndex],
-              slots: {
-                  ...newBlocks[blockIndex].slots,
-                  [field]: value
-              }
-          };
-          return { ...prev, [nodeId]: { ...plan, skeleton_blocks: newBlocks } };
-      });
+      const currentPlan = nodes.find(n => n.chapter.id === nodeId)?.chapter.metadata?.aiContext?.skeletonPlan;
+      if (!currentPlan) return;
+
+      const newBlocks = [...currentPlan.skeleton_blocks];
+      newBlocks[blockIndex] = {
+          ...newBlocks[blockIndex],
+          slots: {
+              ...newBlocks[blockIndex].slots,
+              [field]: value
+          }
+      };
+      
+      updateChapterAIContext(nodeId, { skeletonPlan: { ...currentPlan, skeleton_blocks: newBlocks } });
+  };
+  
+  // NEW: Update Citation Strategy
+  const handleUpdateBlockStrategy = (nodeId: string, blockIndex: number, strategy: CitationStrategy) => {
+      const currentPlan = nodes.find(n => n.chapter.id === nodeId)?.chapter.metadata?.aiContext?.skeletonPlan;
+      if (!currentPlan) return;
+
+      const newBlocks = [...currentPlan.skeleton_blocks];
+      newBlocks[blockIndex] = {
+          ...newBlocks[blockIndex],
+          citation_strategy: strategy
+      };
+      
+      updateChapterAIContext(nodeId, { skeletonPlan: { ...currentPlan, skeleton_blocks: newBlocks } });
   };
 
   const handleDeleteBlock = (nodeId: string, blockIndex: number) => {
-      setPlans(prev => {
-          const plan = prev[nodeId];
-          if (!plan) return prev;
-          const newBlocks = plan.skeleton_blocks.filter((_, i) => i !== blockIndex);
-          return { ...prev, [nodeId]: { ...plan, skeleton_blocks: newBlocks } };
-      });
+      const currentPlan = nodes.find(n => n.chapter.id === nodeId)?.chapter.metadata?.aiContext?.skeletonPlan;
+      if (!currentPlan) return;
+
+      const newBlocks = currentPlan.skeleton_blocks.filter((_, i) => i !== blockIndex);
+      updateChapterAIContext(nodeId, { skeletonPlan: { ...currentPlan, skeleton_blocks: newBlocks } });
   };
 
   const handleAddBlock = (nodeId: string) => {
-      setPlans(prev => {
-          const plan = prev[nodeId];
-          if (!plan) return prev;
-          const newBlock: SkeletonBlock = {
-              block_id: `${nodeId}_manual_${Date.now()}`,
-              move: "Manual-Addition",
-              slots: { Claim: "新论点...", Evidence: [], KeywordsZH: [], KeywordsEN: [] },
-              style_notes: "自定义"
-          };
-          return { ...prev, [nodeId]: { ...plan, skeleton_blocks: [...plan.skeleton_blocks, newBlock] } };
-      });
+      const currentPlan = nodes.find(n => n.chapter.id === nodeId)?.chapter.metadata?.aiContext?.skeletonPlan;
+      if (!currentPlan) return;
+
+      const newBlock: SkeletonBlock = {
+          block_id: `${nodeId}_manual_${Date.now()}`,
+          move: "Manual-Addition",
+          slots: { Claim: "新论点...", Evidence: [], KeywordsZH: [], KeywordsEN: [] },
+          style_notes: "自定义",
+          citation_strategy: 'search_new'
+      };
+      updateChapterAIContext(nodeId, { skeletonPlan: { ...currentPlan, skeleton_blocks: [...currentPlan.skeleton_blocks, newBlock] } });
   };
 
   const handleWriteWithPlan = async (node: FlattenedNode) => {
@@ -514,7 +630,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       }
       
       const nodeId = node.chapter.id;
-      const plan = plans[nodeId];
+      const plan = getAIContext(node.chapter).skeletonPlan;
       if (!plan) return;
 
       setLoadingNodes(prev => ({ ...prev, [nodeId]: true }));
@@ -523,21 +639,30 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       let constructedInstruction = `【严格遵循以下逻辑骨架进行撰写】\n\n写作蓝图: ${plan.writing_blueprint?.section_flow || "按顺序撰写"}\n\n`;
       
       plan.skeleton_blocks.forEach((block, idx) => {
-          const userRefContent = referenceInputs[block.block_id] || "";
+          const userRefContent = getAIContext(node.chapter).referenceInput || "";
           constructedInstruction += `[BLOCK ${idx + 1}: ${block.move}]\n`;
           constructedInstruction += `- 核心主张 (Claim): ${block.slots.Claim}\n`;
           constructedInstruction += `- 写作风格: ${block.style_notes || "学术中立"}\n`;
-          if (userRefContent) {
-              constructedInstruction += `- 【重要】已提供的真实文献素材(Context): \n${userRefContent}\n`;
-              constructedInstruction += `- 指令: 请务必综合上述素材，并适当添加引用标记(如[1])。\n`;
-          } else if (block.slots.Evidence && block.slots.Evidence.length > 0) {
-              constructedInstruction += `- (本段暂无外部文献，请根据Claim进行理论推演或使用通用知识，若必须引用则标注TODO)\n`;
+          
+          // Strategy Handling in Prompt
+          const strategy = block.citation_strategy || 'search_new';
+          if (strategy === 'search_new') {
+              if (userRefContent) {
+                  constructedInstruction += `- 【重要】已提供的真实文献素材(Context): \n${userRefContent}\n`;
+                  constructedInstruction += `- 指令: 请务必综合上述素材，并适当添加引用标记(如[1])。\n`;
+              }
+          } else if (strategy === 'use_existing') {
+              constructedInstruction += `- 指令: 请仅引用【全局参考文献库】中已有的文献 ID，严禁编造。\n`;
+          } else {
+              constructedInstruction += `- 指令: 本段不需要引用参考文献，请进行纯理论推演。\n`;
           }
+          
           constructedInstruction += `\n`;
       });
       
-      if (instructions[nodeId]) {
-          constructedInstruction += `\n【额外用户指令】\n${instructions[nodeId]}`;
+      const userInst = getAIContext(node.chapter).userInstruction;
+      if (userInst) {
+          constructedInstruction += `\n【额外用户指令】\n${userInst}`;
       }
 
       try {
@@ -552,7 +677,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
             settings: apiSettings,
             discussionHistory: selectedChapter.chatHistory, 
             fullChapterTree: thesis.chapters,
-            targetWordCount: targetWordCounts[nodeId] || 800,
+            targetWordCount: getAIContext(node.chapter).targetWordCount || 800,
             chapterIndex: node.chapterIndex // Pass index for numbering
           });
 
@@ -595,7 +720,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
     addLog('Writer', `Step 1/3: 正在快速撰写: ${node.label} ${node.chapter.title} (Quick Mode)...`, 'processing');
 
     try {
-      const userInstruction = instructions[nodeId] || "";
+      const userInstruction = getAIContext(node.chapter).userInstruction || "";
       
       // STEP 1: Draft using Quick Mode Prompt
       // This allows the model to generate "hallucinated" reference placeholders like [[REF:Author Year Keywords]]
@@ -610,7 +735,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
         settings: apiSettings,
         discussionHistory: selectedChapter.chatHistory, 
         fullChapterTree: thesis.chapters,
-        targetWordCount: targetWordCounts[nodeId] || 800,
+        targetWordCount: getAIContext(node.chapter).targetWordCount || 800,
         chapterIndex: node.chapterIndex // Pass index for numbering
       });
 
@@ -644,7 +769,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
   const handleCompleteChapter = async () => {
     if (!selectedChapter) return;
     setIsPostProcessing(true);
-    addLog('Supervisor', '启动章节智能校验 (AI术语识别/全局一致性/参考文献)...', 'processing');
+    addLog('Supervisor', '启动章节智能校验 (AI术语识别/全局一致性)...', 'processing');
 
     const allContent = nodes.map(n => n.chapter.content || "").join("\n\n");
     if (!allContent.trim()) {
@@ -666,17 +791,9 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
 
         setThesis(prev => ({ ...prev, chapters: result.updatedChapters }));
         setReferences(result.updatedReferences);
-        if (result.updatedReferences.length > references.length) {
-            addLog('Reference', `库更新: ${result.updatedReferences.length} 条 (新增 ${result.updatedReferences.length - references.length})`, 'success');
-        } else {
-             addLog('Reference', `库同步完成: 当前共 ${result.updatedReferences.length} 条`, 'success');
-        }
-
+        
         setGlobalTerms(result.updatedTerms);
-        if (result.updatedTerms.length > globalTerms.length) {
-            addLog('TermChecker', `知识库更新: 发现新术语 ${result.updatedTerms.length - globalTerms.length} 个`, 'success');
-        }
-
+        
         addLog('Fixer', '章节校验与优化完成', 'success');
 
     } catch (e) {
@@ -740,10 +857,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
           onClose={() => setIsHistoryOpen(false)}
           history={searchHistory}
           onCite={(res) => {
-              // Note: Searching history doesn't inherently know which block requested it unless we tracked it.
-              // For simplicity, we just alert the user to copy/paste or we could track context.
-              // The modal is mostly for viewing. To strictly support cite-back, we'd need to know the 'active' block.
-              // Given the UI structure, let's copy the citation to clipboard as a fallback.
+              // Copy to clipboard fallback
               const text = generateContextEntry(res, citationStyle);
               navigator.clipboard.writeText(text).then(() => alert("引用内容已复制到剪贴板，请粘贴到对应段落的 Context 框中。"));
           }}
@@ -801,14 +915,33 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                 >
                     📜 搜索历史
                 </button>
+                <button 
+                    onClick={handleFixReferences}
+                    disabled={isPostProcessing}
+                    className="bg-orange-50 hover:bg-orange-100 text-orange-700 border border-orange-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm"
+                    title="强制搜索元数据并规范化所有引用格式"
+                >
+                    {isPostProcessing ? '...' : `🏷️ 规范参考文献 (${citationStyle})`}
+                </button>
                 {advancedMode && (
-                  <button 
-                      onClick={handleAutoPilotChapter}
-                      disabled={isPostProcessing || isAutoPiloting}
-                      className="bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 text-white px-4 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm flex items-center gap-2 animate-pulse-slow"
-                  >
-                      {isAutoPiloting ? '⏳ Auto-Pilot 正在全自动运行...' : '⚡️ 启动 Auto-Pilot (全章自动撰写)'}
-                  </button>
+                  <div className="flex items-center gap-1 bg-purple-50 p-1 rounded-lg border border-purple-100">
+                      <select 
+                          className="text-[10px] bg-transparent font-bold text-purple-700 outline-none"
+                          value={autoPilotScope}
+                          onChange={(e) => setAutoPilotScope(e.target.value as 'section' | 'chapter')}
+                      >
+                          <option value="section">单节</option>
+                          <option value="chapter">全章</option>
+                      </select>
+                      <button 
+                          onClick={() => handleAutoPilot(autoPilotScope === 'section' ? undefined : undefined)}
+                          disabled={isPostProcessing || isAutoPiloting}
+                          className="bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 text-white px-3 py-1 rounded text-xs font-bold transition-colors shadow-sm flex items-center gap-2 animate-pulse-slow"
+                          title={autoPilotScope === 'section' ? "自动运行当前第一个未完成的小节" : "自动运行本章所有小节"}
+                      >
+                          {isAutoPiloting ? '⏳ 运行中...' : `⚡️ Auto-Pilot`}
+                      </button>
+                  </div>
                 )}
                 <button 
                     onClick={handleCompleteChapter}
@@ -888,7 +1021,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                     {nodes.map((node) => {
                        const isGenerating = loadingNodes[node.chapter.id];
                        const hasContent = !!node.chapter.content;
-                       const plan = plans[node.chapter.id];
+                       const plan = getAIContext(node.chapter).skeletonPlan;
+                       const aiContext = getAIContext(node.chapter);
                        
                        return (
                          <div key={node.chapter.id} className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden transition-all hover:shadow-md">
@@ -916,10 +1050,22 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                           type="number"
                                           className="w-12 text-xs bg-transparent border-none outline-none text-center font-mono text-blue-600"
                                           placeholder="800"
-                                          defaultValue={800}
-                                          onChange={(e) => setTargetWordCounts(prev => ({...prev, [node.chapter.id]: parseInt(e.target.value) || 800}))}
+                                          value={aiContext.targetWordCount || 800}
+                                          onChange={(e) => updateChapterAIContext(node.chapter.id, { targetWordCount: parseInt(e.target.value) || 800 })}
                                       />
                                   </div>
+
+                                  {/* Auto-Pilot This Section Button */}
+                                  {advancedMode && (
+                                     <button 
+                                        onClick={() => handleAutoPilot(node.chapter.id)}
+                                        disabled={isGenerating || isAutoPiloting}
+                                        className="px-2 py-1.5 rounded-lg text-xs font-bold text-purple-600 hover:bg-purple-50 transition-colors"
+                                        title="仅为此小节运行 Auto-Pilot"
+                                     >
+                                        ⚡️
+                                     </button>
+                                  )}
 
                                   {advancedMode ? (
                                       !plan ? (
@@ -960,7 +1106,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                         <span>逻辑蓝图: {plan.writing_blueprint?.section_flow}</span>
                                         <div className="flex gap-2">
                                             <button onClick={() => handleAddBlock(node.chapter.id)} className="text-[10px] bg-purple-100 px-2 py-0.5 rounded text-purple-700 hover:bg-purple-200">+ 添加块</button>
-                                            <button onClick={() => setPlans(prev => { const n = {...prev}; delete n[node.chapter.id]; return n; })} className="text-purple-400 underline text-[10px]">重置骨架</button>
+                                            <button onClick={() => updateChapterAIContext(node.chapter.id, { skeletonPlan: undefined })} className="text-purple-400 underline text-[10px]">重置骨架</button>
                                         </div>
                                     </div>
                                     <div className="space-y-3">
@@ -977,6 +1123,24 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                                         <div className="flex items-center gap-2">
                                                             <span className="text-xs font-bold text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded">{block.move}</span>
                                                             <span className="text-[10px] text-slate-400 font-mono">Block {idx + 1}</span>
+                                                            
+                                                            {/* Citation Strategy Selector */}
+                                                            <div className="flex ml-2 bg-slate-100 rounded p-0.5">
+                                                                {(['search_new', 'use_existing', 'none'] as const).map(strat => (
+                                                                    <button
+                                                                        key={strat}
+                                                                        onClick={() => handleUpdateBlockStrategy(node.chapter.id, idx, strat)}
+                                                                        className={`text-[9px] px-2 py-0.5 rounded transition-colors ${
+                                                                            (block.citation_strategy || 'search_new') === strat 
+                                                                            ? 'bg-white shadow text-purple-600 font-bold' 
+                                                                            : 'text-slate-400 hover:text-slate-600'
+                                                                        }`}
+                                                                        title={strat === 'search_new' ? '搜索新文献' : strat === 'use_existing' ? '引用已存' : '不引用'}
+                                                                    >
+                                                                        {strat === 'search_new' ? '🔍 搜' : strat === 'use_existing' ? '📚 存' : '🚫 无'}
+                                                                    </button>
+                                                                ))}
+                                                            </div>
                                                         </div>
                                                         <button 
                                                             onClick={() => handleDeleteBlock(node.chapter.id, idx)}
@@ -996,8 +1160,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                                         placeholder="在此输入核心主张..."
                                                     />
                                                     
-                                                    {/* Evidence / Search Section */}
-                                                    {hasKeywords && (
+                                                    {/* Evidence / Search Section (Conditional on Strategy) */}
+                                                    {(block.citation_strategy || 'search_new') === 'search_new' && hasKeywords && (
                                                         <div className="mt-2 bg-slate-50 p-2 rounded border border-slate-100">
                                                             {/* Recommended Keywords */}
                                                             <div className="flex flex-wrap gap-2 mb-2 items-center text-[10px]">
@@ -1010,11 +1174,6 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                                                     >
                                                                         {q}
                                                                     </button>
-                                                                ))}
-                                                                {block.slots.KeywordsEN && block.slots.KeywordsEN.slice(0,2).map((q, i) => (
-                                                                     <button key={`en_${i}`} onClick={() => handleSearchInput(block.block_id, q)} className="bg-blue-50 border border-blue-100 px-1.5 py-0.5 rounded text-blue-600 hover:border-blue-300">
-                                                                         {q}
-                                                                     </button>
                                                                 ))}
                                                             </div>
 
@@ -1048,7 +1207,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                                                             <div className="text-[9px] text-slate-500 mb-1">{res.authors[0]} et al., {res.year}</div>
                                                                             <div className="text-[9px] text-slate-400 line-clamp-3 mb-2 leading-tight flex-1" title={res.abstract}>{res.abstract}</div>
                                                                             <button 
-                                                                                onClick={() => addCitationToContext(block.block_id, res)}
+                                                                                onClick={() => addCitationToContext(block.block_id, node.chapter.id, res)}
                                                                                 disabled={isAddingRef}
                                                                                 className="mt-auto bg-purple-100 hover:bg-purple-200 text-purple-700 text-[9px] py-1 rounded font-bold border border-purple-200 disabled:opacity-50"
                                                                             >
@@ -1058,17 +1217,19 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                                                     ))}
                                                                 </div>
                                                             )}
-
-                                                            {/* Context Input Area */}
-                                                            <div className="relative">
-                                                                <label className="text-[9px] font-bold text-slate-400 absolute top-1 right-2 bg-white px-1">引用素材上下文 (Context)</label>
-                                                                <textarea 
-                                                                    className="w-full text-xs border border-slate-300 rounded p-2 pt-4 focus:border-blue-400 outline-none h-24 resize-y bg-slate-50/50"
-                                                                    placeholder={searchProvider === 'none' ? "在此粘贴参考文献摘要..." : "点击上方搜索结果的“引用”按钮，标准格式的参考文献将自动填入此处..."}
-                                                                    value={referenceInputs[block.block_id] || ""}
-                                                                    onChange={(e) => setReferenceInputs(prev => ({...prev, [block.block_id]: e.target.value}))}
-                                                                />
-                                                            </div>
+                                                            
+                                                            {/* Context Display (Shared for node) */}
+                                                            {idx === 0 && (
+                                                                <div className="relative">
+                                                                    <label className="text-[9px] font-bold text-slate-400 absolute top-1 right-2 bg-white px-1">引用素材上下文 (Context)</label>
+                                                                    <textarea 
+                                                                        className="w-full text-xs border border-slate-300 rounded p-2 pt-4 focus:border-blue-400 outline-none h-24 resize-y bg-slate-50/50"
+                                                                        placeholder={searchProvider === 'none' ? "在此粘贴参考文献摘要..." : "点击上方搜索结果的“引用”按钮，标准格式的参考文献将自动填入此处..."}
+                                                                        value={aiContext.referenceInput || ""}
+                                                                        onChange={(e) => updateChapterAIContext(node.chapter.id, { referenceInput: e.target.value })}
+                                                                    />
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     )}
                                                 </div>
@@ -1095,8 +1256,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                         <textarea 
                                             className="w-full text-xs border border-purple-100 hover:border-purple-200 focus:border-purple-400 focus:bg-white rounded p-1.5 outline-none transition-all resize-none h-16"
                                             placeholder={`[可选] 粘贴师兄论文中的相似段落作为结构模板 (AI 将模仿其起承转合)...`}
-                                            value={refTemplates[node.chapter.id] || ""}
-                                            onChange={(e) => setRefTemplates(prev => ({...prev, [node.chapter.id]: e.target.value}))}
+                                            value={aiContext.refTemplate || ""}
+                                            onChange={(e) => updateChapterAIContext(node.chapter.id, { refTemplate: e.target.value })}
                                         />
                                    </div>
                                )}
@@ -1106,17 +1267,25 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                    <textarea 
                                       className="w-full text-xs bg-transparent border border-transparent hover:border-slate-200 focus:border-blue-300 focus:bg-white rounded p-1.5 outline-none transition-all resize-none h-8 focus:h-20"
                                       placeholder={`给AI下达指令 (例如: 重点描述YOLO算法的改进点)...`}
-                                      value={instructions[node.chapter.id] || ""}
-                                      onChange={(e) => setInstructions(prev => ({...prev, [node.chapter.id]: e.target.value}))}
+                                      value={aiContext.userInstruction || ""}
+                                      onChange={(e) => updateChapterAIContext(node.chapter.id, { userInstruction: e.target.value })}
                                    />
                                </div>
                             </div>
 
-                            {/* Result Preview */}
+                            {/* Result Preview with Editing Enabled */}
                             {hasContent && (
-                               <div className="p-4 bg-white">
-                                  <div className="max-h-60 overflow-y-auto custom-scrollbar pr-2 border-l-2 border-slate-100 pl-4">
-                                     {renderPreviewContent(node.chapter.content || "")}
+                               <div className="p-4 bg-white relative group/edit">
+                                  <textarea
+                                      className="w-full h-64 text-sm text-slate-700 leading-relaxed outline-none border border-transparent focus:border-blue-200 rounded p-2 resize-y"
+                                      value={node.chapter.content}
+                                      onChange={(e) => setThesis(prev => ({
+                                          ...prev,
+                                          chapters: updateNodeContent(prev.chapters, node.chapter.id, e.target.value)
+                                      }))}
+                                  />
+                                  <div className="absolute top-2 right-2 opacity-0 group-hover/edit:opacity-100 transition-opacity bg-white/80 p-1 rounded text-[10px] text-slate-400 pointer-events-none">
+                                      点击编辑
                                   </div>
                                </div>
                             )}

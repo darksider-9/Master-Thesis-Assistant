@@ -1,4 +1,5 @@
 
+
 import {
   FormatRules,
   ThesisStructure,
@@ -324,9 +325,6 @@ export const extractThesisFromXML = (xmlString: string): ExtractedThesisData => 
     return { chapters, rawTextPreview: totalTextPreview };
 };
 
-// ... (Rest of existing code: isStyleAutoNumbered, isProtoAutoNumbered, etc.) ...
-// Keep everything below unchanged until parseWordXML
-// Ensure existing functions like generateThesisXML, updateHeadersAndFooters etc are preserved exactly.
 
 const isStyleAutoNumbered = (stylesRoot: Element | null, styleId: string): boolean => {
     if (!stylesRoot) return false;
@@ -975,6 +973,7 @@ const createContentNodes = (
     return nodes;
 };
 
+// --- RESTORED: Extract Mapping Function ---
 const extractMapping = (
     body: Element, 
     headingStyles: Record<number, string>, 
@@ -983,6 +982,7 @@ const extractMapping = (
     const sections: MappingSection[] = [];
     const blocks: MappingBlock[] = [];
     
+    // Initial Root/Front section
     let currentSection: MappingSection = {
         id: `sec_${globalId++}`,
         kind: 'front',
@@ -1033,6 +1033,7 @@ const extractMapping = (
             type = 'table';
         }
         
+        // Determine if we start a new section
         let startNewSection = false;
         let nextKind: MappingSectionKind = currentSection.kind;
         
@@ -1199,6 +1200,9 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
     let chapterCounters = { fig: 0, tbl: 0, eq: 0 };
     let lastInsertedPara: Element | null = null;
 
+    // Check if we should keep numbering (default to false = strip, to enforce Word auto-numbering)
+    const shouldStripNumbering = styleSettings ? !styleSettings.keepHeadingNumbers : true;
+
     const insertChapter = (ch: typeof thesis.chapters[0]) => {
         let pTitle: Element | null = null;
         let titleText = ch.title;
@@ -1213,19 +1217,35 @@ export const generateThesisXML = (thesis: ThesisStructure, rules: FormatRules, r
                 const pPr = getChildByTagNameNS(pTitle, NS.w, "pPr");
                 if (pPr) {
                     const numPr = getChildByTagNameNS(pPr, NS.w, "numPr");
-                    if (numPr) pPr.removeChild(numPr);
+                    // If keeping manual numbers (keepHeadingNumbers=true), we REMOVE Word's automatic numPr to avoid double numbering.
+                    // If stripping manual numbers (keepHeadingNumbers=false), we KEEP Word's numPr so it auto-numbers.
+                    if (!shouldStripNumbering && numPr) {
+                         pPr.removeChild(numPr);
+                    }
                 }
 
                 if(styleSettings) applyStyleOverrides(doc, pTitle, styleSettings.heading1);
              }
         } else if (ch.level === 2 && protos.h2) {
-             const strippedTitle = stripHeadingNumbering(titleText);
+             const strippedTitle = shouldStripNumbering ? stripHeadingNumbering(titleText) : titleText;
              pTitle = cloneWithText(doc, protos.h2, strippedTitle);
              if(styleSettings) applyStyleOverrides(doc, pTitle, styleSettings.heading2);
+             
+             if (!shouldStripNumbering) {
+                 const pPr = getChildByTagNameNS(pTitle, NS.w, "pPr");
+                 const numPr = pPr ? getChildByTagNameNS(pPr, NS.w, "numPr") : null;
+                 if (numPr) pPr?.removeChild(numPr);
+             }
         } else if (ch.level === 3 && protos.h3) {
-             const strippedTitle = stripHeadingNumbering(titleText);
+             const strippedTitle = shouldStripNumbering ? stripHeadingNumbering(titleText) : titleText;
              pTitle = cloneWithText(doc, protos.h3, strippedTitle);
              if(styleSettings) applyStyleOverrides(doc, pTitle, styleSettings.heading3);
+
+             if (!shouldStripNumbering) {
+                 const pPr = getChildByTagNameNS(pTitle, NS.w, "pPr");
+                 const numPr = pPr ? getChildByTagNameNS(pPr, NS.w, "numPr") : null;
+                 if (numPr) pPr?.removeChild(numPr);
+             }
         } else {
              pTitle = cloneWithText(doc, protos.h1 || protos.normal!, titleText);
         }

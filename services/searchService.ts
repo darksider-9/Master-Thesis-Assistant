@@ -1,5 +1,6 @@
 
-import { SearchProvider, SearchResult, ReferenceMetadata } from "../types";
+
+import { SearchProvider, SearchResult, ReferenceMetadata, ApiSettings } from "../types";
 
 const TIMEOUT_MS = 120000; // Increased to 120 seconds for slow academic APIs
 
@@ -17,7 +18,142 @@ const fetchWithTimeout = async (url: string, options: RequestInit = {}) => {
   }
 };
 
-// --- New: Fetch Detailed Metadata for Strict Formatting ---
+// Helper: Calculate Cosine Similarity for Titles (Simple Bag of Words)
+const calculateTitleSimilarity = (t1: string, t2: string): number => {
+    if (!t1 || !t2) return 0;
+    const clean = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 2);
+    const s1 = new Set(clean(t1));
+    const s2 = new Set(clean(t2));
+    
+    if (s1.size === 0 || s2.size === 0) return 0;
+    
+    let intersection = 0;
+    s1.forEach(w => { if (s2.has(w)) intersection++; });
+    
+    const union = new Set([...s1, ...s2]).size;
+    return intersection / union; // Jaccard Index approximation
+};
+
+// --- New: Fetch Detailed Metadata via Multi-Source Aggregation ---
+export const enrichReferenceMetadata = async (
+    query: string, 
+    settings: ApiSettings, 
+    strictTitleMatch: boolean = false
+): Promise<ReferenceMetadata | null> => {
+    // We will query multiple providers in parallel to find the best match and most complete data.
+    const promises: Promise<SearchResult[]>[] = [
+        searchCrossref(query).catch(() => []),      // Best for DOI, Journal, Volume, Issue, Pages
+        searchOpenAlex(query).catch(() => []),      // Good for Authors, Title cleaning
+        searchSemanticScholar(query).catch(() => [])// Good for Abstract
+    ];
+
+    // If Serper Key is provided, use it as a powerful fallback or verifier
+    if (settings.searchApiKey && settings.searchProvider === 'serper') {
+        promises.push(searchSerper(query, settings.searchApiKey).catch(() => []));
+    }
+
+    try {
+        const resultsArray = await Promise.all(promises);
+        
+        // Flatten results, identifying source
+        const crossrefMatches = resultsArray[0] || [];
+        const openAlexMatches = resultsArray[1] || [];
+        const s2Matches = resultsArray[2] || [];
+        const serperMatches = resultsArray[3] || [];
+
+        // 1. Determine the "Anchor" result (The one we trust most for identity)
+        // Crossref is preferred for citation data.
+        let anchor = crossrefMatches[0];
+        let anchorSource = 'crossref';
+
+        if (!anchor) {
+            anchor = openAlexMatches[0];
+            anchorSource = 'openalex';
+        }
+        if (!anchor) {
+            anchor = s2Matches[0];
+            anchorSource = 's2';
+        }
+        if (!anchor) {
+            anchor = serperMatches[0];
+            anchorSource = 'serper';
+        }
+
+        if (!anchor) return null; // No results found anywhere
+
+        // --- STRICT TITLE CHECK ---
+        // If we expect a strict match (e.g. we already know the title), reject if similarity is low
+        if (strictTitleMatch) {
+            const similarity = calculateTitleSimilarity(query, anchor.title);
+            // Threshold 0.4 allows for some variation (e.g. subtitle missing, slight punctuation diffs)
+            // but rejects completely different papers.
+            if (similarity < 0.4) {
+                console.warn(`Enrichment Rejected: Title mismatch. Expected "${query}", Got "${anchor.title}" (Sim: ${similarity})`);
+                return null;
+            }
+        }
+
+        // 2. Initialize Metadata from Anchor
+        // We map SearchResult back to ReferenceMetadata structure
+        const meta: ReferenceMetadata = {
+            title: anchor.title,
+            authors: anchor.authors,
+            year: anchor.year,
+            journal: anchor.venue,
+            doi: anchor.url?.includes('doi.org') ? anchor.url.replace('https://doi.org/', '') : undefined,
+            type: 'journal-article' // default
+        };
+
+        // 3. Enrichment: Try to fill gaps using other sources
+        // Helper: Simple title similarity check to ensure we merge the SAME paper
+        const isSamePaper = (t1: string, t2: string) => calculateTitleSimilarity(t1, t2) > 0.6;
+
+        // -> Fill from OpenAlex (if anchor wasn't OpenAlex)
+        if (anchorSource !== 'openalex' && openAlexMatches.length > 0) {
+            const match = openAlexMatches.find(r => isSamePaper(r.title, meta.title));
+            if (match) {
+                if (!meta.authors || meta.authors.length === 0 || match.authors.length > meta.authors.length) {
+                    meta.authors = match.authors; // OpenAlex authors are often cleaner/more complete
+                }
+                if (!meta.doi && match.url?.includes('doi.org')) {
+                    meta.doi = match.url.replace('https://doi.org/', '');
+                }
+                if (!meta.year || meta.year === 'N/A') meta.year = match.year;
+            }
+        }
+
+        // -> Fill from Crossref (if anchor wasn't Crossref - rare but possible)
+        if (anchorSource !== 'crossref' && crossrefMatches.length > 0) {
+            const match = crossrefMatches.find(r => isSamePaper(r.title, meta.title));
+            if (match) {
+                // Crossref is authority on these:
+                if (match.venue) meta.journal = match.venue;
+                if (match.url?.includes('doi.org')) meta.doi = match.url.replace('https://doi.org/', '');
+            }
+        }
+
+        // -> Attempt to get Volume/Issue/Pages via a dedicated single-item fetch if we have a title/doi
+        // The search lists often don't return vol/issue. Let's try to get specific metadata if we have a DOI or clean title.
+        const refinement = await fetchDetailedRefMetadata(meta.title);
+        if (refinement) {
+            // Overwrite with detailed bibliographic data if available
+            if (refinement.volume) meta.volume = refinement.volume;
+            if (refinement.issue) meta.issue = refinement.issue;
+            if (refinement.pages) meta.pages = refinement.pages;
+            if (refinement.journal) meta.journal = refinement.journal; // Official abbr or full name
+            if (refinement.doi) meta.doi = refinement.doi;
+            if (refinement.type) meta.type = refinement.type;
+        }
+
+        return meta;
+
+    } catch (e) {
+        console.error("Enrichment failed", e);
+        return null;
+    }
+};
+
+// --- Existing: Fetch Detailed Metadata for Strict Formatting (Crossref Single Item) ---
 export const fetchDetailedRefMetadata = async (title: string): Promise<ReferenceMetadata | null> => {
     try {
         const politeMail = "thesis_assistant_user@example.com";

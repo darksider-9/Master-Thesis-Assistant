@@ -180,15 +180,15 @@ const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, 
 
   return (
     <div className="max-w-4xl mx-auto mt-12">
-      <div className="text-center mb-12">
-        <h2 className="text-3xl font-bold text-slate-900 mb-4">上传 Word XML 模版</h2>
+      <div className="text-center mb-8">
+        <h2 className="text-3xl font-bold text-slate-900 mb-4">上传 Word 模版文件</h2>
         <p className="text-slate-600 max-w-2xl mx-auto">
-          请上传 Word 另存为的 <span className="font-mono text-blue-600 font-bold">Word 2003 XML</span> 或 <span className="font-mono text-blue-600 font-bold">Flat OPC</span> 文件。
+          请上传 Word 另存为的 <span className="font-mono text-blue-600 font-bold bg-blue-50 px-1 rounded">Word 2003 XML</span> 格式文件，系统将自动解析样式与结构。
         </p>
       </div>
 
       <div
-        className={`relative border-2 border-dashed rounded-2xl p-20 flex flex-col items-center justify-center transition-all cursor-pointer ${
+        className={`relative border-2 border-dashed rounded-2xl p-16 flex flex-col items-center justify-center transition-all cursor-pointer ${
           dragActive ? 'border-blue-500 bg-blue-50' : 'border-slate-300 bg-white hover:border-slate-400'
         }`}
         onDragEnter={onDrag}
@@ -197,12 +197,13 @@ const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, 
         onDrop={onDrop}
         onClick={() => document.getElementById('file-upload')?.click()}
       >
-        <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mb-6 pointer-events-none">
+        <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mb-6 pointer-events-none animate-pulse-slow">
           <svg className="w-8 h-8 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
           </svg>
         </div>
-        <p className="text-slate-900 font-medium mb-2 pointer-events-none">拖拽文件到此处，或点击上传</p>
+        <p className="text-slate-900 font-medium mb-2 pointer-events-none text-lg">点击上传或拖拽文件至此</p>
+        <p className="text-slate-400 text-sm mb-6 pointer-events-none">支持格式: .xml (Word 2003 XML / Flat OPC)</p>
         
         <input
           type="file"
@@ -212,10 +213,23 @@ const FormatAnalyzer: React.FC<FormatAnalyzerProps> = ({ onUpload, formatRules, 
           onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
         />
         <button
-          className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg pointer-events-none transition-colors shadow-lg shadow-blue-200"
+          className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-2.5 rounded-lg pointer-events-none transition-colors shadow-lg shadow-blue-200 font-bold"
         >
-          浏览文件
+          浏览本地文件
         </button>
+      </div>
+
+      <div className="mt-8 bg-yellow-50 border border-yellow-200 rounded-xl p-4 flex gap-4 items-start">
+        <div className="text-2xl">💡</div>
+        <div>
+            <h4 className="font-bold text-yellow-800 text-sm mb-1">如何获取正确的文件格式？</h4>
+            <ol className="text-xs text-yellow-700 space-y-1 list-decimal ml-4">
+                <li>在 Microsoft Word 中打开您的论文模版文件。</li>
+                <li>点击左上角的 <strong>“文件” (File)</strong> &gt; <strong>“另存为” (Save As)</strong>。</li>
+                <li>在保存类型下拉菜单中，选择 <strong>“Word 2003 XML 文档 (*.xml)”</strong>。</li>
+                <li>将保存后的 XML 文件上传到此处即可。</li>
+            </ol>
+        </div>
       </div>
     </div>
   );

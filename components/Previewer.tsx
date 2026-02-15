@@ -1,4 +1,5 @@
 
+
 import React, { useState } from 'react';
 import { ThesisStructure, FormatRules, Reference, StyleSettings, StyleConfig, FontFamily, FontSizeName } from '../types';
 import StructureVisualizer from './StructureVisualizer';
@@ -37,11 +38,12 @@ const DEFAULT_SETTINGS: StyleSettings = {
     header: {
         oddPage: 'chapterTitle',
         evenPageText: '东南大学硕士学位论文'
-    }
+    },
+    keepHeadingNumbers: false // Default to false (strip standard 1.1) to allow Word auto-numbering
 };
 
-// Define a type that only includes keys mapping to StyleConfig (excluding equationSeparator/header)
-type StyleConfigKey = Exclude<keyof StyleSettings, 'equationSeparator' | 'header'>;
+// Define a type that only includes keys mapping to StyleConfig (excluding equationSeparator/header/keepHeadingNumbers)
+type StyleConfigKey = Exclude<keyof StyleSettings, 'equationSeparator' | 'header' | 'keepHeadingNumbers'>;
 
 const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }) => {
   const [viewMode, setViewMode] = useState<'doc' | 'visual'>('doc');
@@ -51,6 +53,19 @@ const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }
   // Debug State
   const [showDebugModal, setShowDebugModal] = useState(false);
   const [debugInfo, setDebugInfo] = useState<HeaderDebugInfo[]>([]);
+
+  // Restored helper function (kept for legacy compatibility or enhanced debug labeling)
+  const getSectionTypeLabel = (index: number, total: number, headers: any[]) => {
+      // Heuristic guess
+      if (index === 1) return "第1节 (封面/目录)";
+      if (index === total) return `第${index}节 (封底/附录)`;
+      
+      // Check content
+      const combinedText = headers.map((h: any) => h.data.text).join(" ");
+      if (combinedText.includes("章") || combinedText.includes("Chapter")) return `第${index}节 (正文)`;
+      
+      return `第${index}节 (正文)`;
+  };
 
   const handleExport = () => {
     try {
@@ -156,18 +171,6 @@ const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }
       });
   };
 
-  const getSectionTypeLabel = (index: number, total: number, headers: any[]) => {
-      // Heuristic guess
-      if (index === 1) return "第1节 (封面/目录)";
-      if (index === total) return `第${index}节 (封底/附录)`;
-      
-      // Check content
-      const combinedText = headers.map((h: any) => h.data.text).join(" ");
-      if (combinedText.includes("章") || combinedText.includes("Chapter")) return `第${index}节 (正文)`;
-      
-      return `第${index}节 (正文)`;
-  };
-
   return (
     <div className="h-full flex flex-col relative">
        <div className="flex justify-between px-8 py-2 mb-2 items-center">
@@ -230,7 +233,10 @@ const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }
                                 <div key={i} className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
                                     <div className="px-4 py-2 bg-slate-50 border-b font-mono text-sm font-bold text-slate-700 flex flex-col gap-1">
                                         <div className="flex justify-between items-center">
-                                            <span>Section {sect.sectionIndex}</span>
+                                            <span>
+                                                {/* Use restored function for labeling */}
+                                                {getSectionTypeLabel(sect.sectionIndex, debugInfo.length, sect.headers)}
+                                            </span>
                                             {/* Show Start Text prominently to help user identify chapter */}
                                             <span className="text-blue-600 font-serif max-w-md truncate text-right">
                                                 &quot;{sect.sectionStartText}&quot;
@@ -331,6 +337,25 @@ const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }
                              </button>
                          </div>
                      </div>
+                     
+                     <div className="flex items-center justify-between">
+                         <span className="font-bold text-slate-600 text-sm">保留标题自动编号</span>
+                         <div className="flex bg-slate-100 rounded p-1 text-xs">
+                             <button 
+                               onClick={() => setStyles(prev => ({...prev, keepHeadingNumbers: true}))}
+                               className={`px-3 py-1 rounded transition-colors ${styles.keepHeadingNumbers ? 'bg-white shadow text-green-600 font-bold' : 'text-slate-500'}`}
+                             >
+                                保留(1.1)
+                             </button>
+                             <button 
+                               onClick={() => setStyles(prev => ({...prev, keepHeadingNumbers: false}))}
+                               className={`px-3 py-1 rounded transition-colors ${!styles.keepHeadingNumbers ? 'bg-white shadow text-red-600 font-bold' : 'text-slate-500'}`}
+                             >
+                                移除(Word自动)
+                             </button>
+                         </div>
+                     </div>
+                     <p className="text-[10px] text-slate-400">选择“移除”通常能激活 Word 样式的自动编号功能。若您的模版无自动编号，请选择“保留”。</p>
 
                      <div className="flex flex-col gap-2 bg-slate-50 p-3 rounded-lg border border-slate-100">
                          <span className="font-bold text-slate-600 text-sm">页眉高级设置</span>
@@ -382,7 +407,7 @@ const Previewer: React.FC<PreviewerProps> = ({ thesis, formatRules, references }
                 </div>
 
                 <div className="mt-4 p-3 bg-blue-50 text-blue-700 text-[10px] rounded leading-relaxed">
-                    注：导出时系统已强制移除标题的自动编号属性，转为手动全标题模式，以解决 Word 中编号丢失或双重编号的问题。请在 Word 中更新域代码（全选 → F9）以刷新页眉。
+                    注：若选择移除编号，系统将剥离类似 "1.1" 的前缀，依赖 Word 样式的自动编号。请在 Word 中更新域代码（全选 → F9）以刷新页眉和目录。
                 </div>
             </div>
         )}
