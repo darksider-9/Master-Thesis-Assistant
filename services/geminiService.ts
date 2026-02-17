@@ -728,9 +728,7 @@ export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
     - **场景 1 (U-Net)**: 
       - 如果文中提到 "使用 U-Net 进行分割"，且全局库中有 *Ronneberger et al. U-Net...*，则**必须**复用该参考文献。
       - 如果全局库中只有一本通用的《深度学习》教材，**绝对禁止**引用它来佐证 "U-Net" 的具体细节，必须新建引用 \`[[REF:KEYWORD_PLACEHOLDER: Ronneberger 2015 U-Net]]\`。
-    - **场景 2 (L1/L2 Loss)**:
-      - 如果 L1 Loss 和 L2 Loss 的定义出自同一篇综述文章，且该文章已在库中，则两者可以共用同一个 ID。
-      - 如果文中讨论的是 "Focal Loss"，而库中只有 "Cross Entropy Loss" 的文献，**禁止**复用，必须新建。
+    
     **操作指令**:
     1. **复用**: 只有确认颗粒度匹配时，使用 \`[[REF:ID]]\` (如 [[REF:12]])。
     2. **新增**: 如果库中没有匹配层级的文献，使用 \`[[REF:KEYWORD_PLACEHOLDER: 详细关键词]]\`。
@@ -841,9 +839,7 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
     - **场景 1 (U-Net)**: 
       - 如果文中提到 "使用 U-Net 进行分割"，且全局库中有 *Ronneberger et al. U-Net...*，则**必须**复用该 ID。
       - 如果全局库中只有一本通用的《深度学习》教材，**绝对禁止**引用它来佐证 "U-Net" 的具体细节，必须新建引用 \`[[REF:KEYWORD_PLACEHOLDER: Ronneberger U-Net]]\`。
-    - **场景 2 (L1/L2 Loss)**:
-      - 如果 L1 Loss 和 L2 Loss 的定义出自同一篇综述文章，且该文章已在库中，则两者可以共用同一个 ID。
-      - 如果文中讨论的是 "Focal Loss"，而库中只有 "Cross Entropy Loss" 的文献，**禁止**复用，必须新建。
+    
     **操作指令**:
     1. **复用**: 只有确认颗粒度匹配时，使用 \`[[REF:ID]]\` (如 [[REF:12]])。
     2. **新增**: 如果库中没有匹配层级的文献，使用 \`[[REF:KEYWORD_PLACEHOLDER: 详细标题关键词]]\`。
