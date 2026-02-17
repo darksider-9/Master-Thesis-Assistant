@@ -85,6 +85,7 @@ const HUMAN_WRITING_STYLE = `
 请直接输出改写后的正文，**不要**包含“好的”、“根据您的要求”等任何对话性文字。保持内容的学术密度，不要为了凑字数而产生废话。
 `;
 
+// ... [LOGIC_SKELETON_PROMPT and generateContentUnified are unchanged] ...
 const LOGIC_SKELETON_PROMPT = `
 你是“学位论文逻辑架构师”。你的任务是根据用户的【研究课题】、【核心探讨记录】以及可选的【参考范文】，为当前小节设计一个详细的**逻辑骨架**和**循证搜索计划**。
 
@@ -562,13 +563,21 @@ export const filterSearchResultsAI = async (
 export const polishDraftContent = async (
     rawText: string,
     chapterIndex: number, // Pass index for context
-    settings: ApiSettings
+    settings: ApiSettings,
+    targetWordCount?: number // NEW: Target count constraint
 ): Promise<string> => {
+    // Internal word count calculation for prompting
+    const currentLen = rawText.length;
+    const constraintText = targetWordCount 
+        ? `目标字数为 ${targetWordCount}。润色后的内容长度不得超过目标字数的 **140%**`
+        : `润色后的内容长度不得超过原稿长度的 **140%**`;
+
     const systemPrompt = `
     你是一名“学术论文逻辑润色专家”。你的任务是优化一段AI生成的初稿，使其逻辑更连贯、内容更充实，并修复格式问题。
 
     【核心约束：字数控制 (Word Count Constraint)】
-    - **严禁字数爆炸**：润色后的内容长度不得超过原稿长度的 **140%**。
+    - **当前文本字数**: ${currentLen} 字。
+    - **严禁字数爆炸**：${constraintText}。
     - 你的任务是“精炼与逻辑优化”，而不是无意义的扩写。
 
     【核心约束：占位符保护 (Placeholder Preservation - CRITICAL)】
@@ -633,8 +642,15 @@ export const polishDraftContent = async (
 export const finalizeAcademicStyle = async (
     text: string,
     chapterIndex: number,
-    settings: ApiSettings
+    settings: ApiSettings,
+    targetWordCount?: number // NEW: Target count constraint
 ): Promise<string> => {
+    // Internal word count calculation for prompting
+    const currentLen = text.length;
+    const constraintText = targetWordCount
+        ? `目标字数为 ${targetWordCount}。不要大幅扩写，保持在目标字数的 140% 以内`
+        : `不要大幅扩写，保持在原稿字数的 140% 以内`;
+
     const systemPrompt = `
     ${HUMAN_WRITING_STYLE}
 
@@ -642,7 +658,7 @@ export const finalizeAcademicStyle = async (
     
     【核心约束】
     1. **绝对保留占位符**：检查并确保 \`[[FIG:...]]\` 和 \`[[TBL:...]]\` 完好无损。
-    2. **字数约束**：不要大幅扩写，保持在原稿字数的 140% 以内。
+    2. **字数约束**：当前字数为 ${currentLen} 字。${constraintText}。
 
     1. **再次检查语气**：确保没有“总而言之”、“综上所述”、“我们发现”等词汇。强制转换为客观被动语态。
     2. **检查符号规范**：确保行内公式使用 \`[[SYM:...]]\` 且不换行。独立公式使用 \`[[EQ:...]]\`。
@@ -694,6 +710,29 @@ export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
       ? `【重要字数要求】本节内容的生成长度**必须**至少达到 ${targetWordCount} 字。`
       : "";
 
+  // Extract Metadata for context (Added for ensuring visuals/methodology are respected)
+  const meta = chapterLevel1.metadata || {};
+  let metadataContext = "";
+  if (meta.methodology) metadataContext += `\n- 核心方法论 (Methodology): ${meta.methodology}`;
+  if (meta.dataSources) metadataContext += `\n- 数据来源 (Data): ${meta.dataSources}`;
+  if (meta.experimentalDesign) metadataContext += `\n- 实验设计 (Experiments): ${meta.experimentalDesign}`;
+  if (meta.resultsAnalysis) metadataContext += `\n- 结果分析 (Results): ${meta.resultsAnalysis}`;
+
+  let visualPlanContext = "";
+  if (meta.figurePlan && meta.figurePlan.length > 0) {
+      visualPlanContext += `\n【必须落实的图表规划 (Mandatory Visuals)】\n请在正文适当位置自然地插入以下图表（必须使用标准占位符 \`[[FIG:描述]]\`）：\n`;
+      meta.figurePlan.forEach(f => visualPlanContext += `- ${f}\n`);
+  }
+  if (meta.tablePlan && meta.tablePlan.length > 0) {
+      if (!visualPlanContext) visualPlanContext += `\n【必须落实的图表规划 (Mandatory Visuals)】\n`;
+      visualPlanContext += `请在正文适当位置自然地插入以下表格（必须使用标准占位符 \`[[TBL:描述]]\`）：\n`;
+      meta.tablePlan.forEach(t => visualPlanContext += `- ${t}\n`);
+  }
+  // Add strict instruction if visuals exist
+  if (visualPlanContext) {
+      visualPlanContext += `\n**注意**：你必须在正文中明确插入上述图表占位符，严禁遗漏！`;
+  }
+
   const systemPrompt = `
     ${HUMAN_WRITING_STYLE}
     
@@ -707,6 +746,10 @@ export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
 
     【全文结构上下文】
     ${structureContext}
+
+    【本章核心规划 (Metadata) - 必须落实】
+    ${metadataContext || "(无特殊元数据)"}
+    ${visualPlanContext || ""}
 
     【结构约束 (Structure Constraints)】
     1. **扁平化输出**：你当前的任务是撰写 "${targetSection.title}" 这一具体小节的内容。
@@ -728,6 +771,9 @@ export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
     - **场景 1 (U-Net)**: 
       - 如果文中提到 "使用 U-Net 进行分割"，且全局库中有 *Ronneberger et al. U-Net...*，则**必须**复用该参考文献。
       - 如果全局库中只有一本通用的《深度学习》教材，**绝对禁止**引用它来佐证 "U-Net" 的具体细节，必须新建引用 \`[[REF:KEYWORD_PLACEHOLDER: Ronneberger 2015 U-Net]]\`。
+    - **场景 2 (L1/L2 Loss)**:
+      - 如果 L1 Loss 和 L2 Loss 的定义出自同一篇综述文章，且该文章已在库中，则两者可以共用同一个 ID。
+      - 如果文中讨论的是 "Focal Loss"，而库中只有 "Cross Entropy Loss" 的文献，**禁止**复用，必须新建。
     
     **操作指令**:
     1. **复用**: 只有确认颗粒度匹配时，使用 \`[[REF:ID]]\` (如 [[REF:12]])。
@@ -805,6 +851,29 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
       ? `【重要字数要求】本节内容的生成长度**必须**至少达到 ${targetWordCount} 字。请务必深入展开每一个逻辑点，提供详尽的分析、推导或描述，严禁简略带过。`
       : "";
 
+  // Extract Metadata for context (Added for ensuring visuals/methodology are respected)
+  const meta = chapterLevel1.metadata || {};
+  let metadataContext = "";
+  if (meta.methodology) metadataContext += `\n- 核心方法论 (Methodology): ${meta.methodology}`;
+  if (meta.dataSources) metadataContext += `\n- 数据来源 (Data): ${meta.dataSources}`;
+  if (meta.experimentalDesign) metadataContext += `\n- 实验设计 (Experiments): ${meta.experimentalDesign}`;
+  if (meta.resultsAnalysis) metadataContext += `\n- 结果分析 (Results): ${meta.resultsAnalysis}`;
+
+  let visualPlanContext = "";
+  if (meta.figurePlan && meta.figurePlan.length > 0) {
+      visualPlanContext += `\n【必须落实的图表规划 (Mandatory Visuals)】\n请在正文适当位置自然地插入以下图表（必须使用标准占位符 \`[[FIG:描述]]\`）：\n`;
+      meta.figurePlan.forEach(f => visualPlanContext += `- ${f}\n`);
+  }
+  if (meta.tablePlan && meta.tablePlan.length > 0) {
+      if (!visualPlanContext) visualPlanContext += `\n【必须落实的图表规划 (Mandatory Visuals)】\n`;
+      visualPlanContext += `请在正文适当位置自然地插入以下表格（必须使用标准占位符 \`[[TBL:描述]]\`）：\n`;
+      meta.tablePlan.forEach(t => visualPlanContext += `- ${t}\n`);
+  }
+  // Add strict instruction if visuals exist
+  if (visualPlanContext) {
+      visualPlanContext += `\n**注意**：你必须在正文中明确插入上述图表占位符，严禁遗漏！`;
+  }
+
   const systemPrompt = `
     ${HUMAN_WRITING_STYLE}
     
@@ -828,6 +897,10 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
     以下是作者之前与导师确认过的本章核心思路（方法/数据/实验），请务必将其融入正文：
     ${discussionContextStr}
     
+    【本章核心规划 (Metadata) - 必须落实】
+    ${metadataContext || "(无特殊元数据)"}
+    ${visualPlanContext || ""}
+
     【全局参考文献库 (Global References) - 严格引用规则】
     已存在列表:
     ${globalRefStr || "(暂无全局文献，请创建新引用)"}
@@ -839,6 +912,9 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
     - **场景 1 (U-Net)**: 
       - 如果文中提到 "使用 U-Net 进行分割"，且全局库中有 *Ronneberger et al. U-Net...*，则**必须**复用该 ID。
       - 如果全局库中只有一本通用的《深度学习》教材，**绝对禁止**引用它来佐证 "U-Net" 的具体细节，必须新建引用 \`[[REF:KEYWORD_PLACEHOLDER: Ronneberger U-Net]]\`。
+    - **场景 2 (L1/L2 Loss)**:
+      - 如果 L1 Loss 和 L2 Loss 的定义出自同一篇综述文章，且该文章已在库中，则两者可以共用同一个 ID。
+      - 如果文中讨论的是 "Focal Loss"，而库中只有 "Cross Entropy Loss" 的文献，**禁止**复用，必须新建。
     
     **操作指令**:
     1. **复用**: 只有确认颗粒度匹配时，使用 \`[[REF:ID]]\` (如 [[REF:12]])。
@@ -971,6 +1047,29 @@ const rewriteContentAI = async (text: string, instructions: string, settings: Ap
     } catch (e) {
         return text; // Fallback to original
     }
+};
+
+// Helper for safe punctuation replacement
+const convertToChinesePunctuation = (text: string): string => {
+    if (!text) return "";
+    // Strategy: Split by placeholders to protect them from regex replacement
+    // We use capturing group () to keep the separators (the tags themselves) in the result array.
+    const parts = text.split(/(\[\[.*?\]\])/g);
+    
+    return parts.map(part => {
+        // 1. If it is a protected placeholder, return as is
+        if (part.startsWith('[[') && part.endsWith(']]')) {
+            return part;
+        }
+
+        // 2. If it is normal text, perform the replacements
+        // Replace English ( ) , with Chinese （ ） ，
+        // Also handling potential spaces around them for cleaner formatting
+        return part
+            .replace(/\s*,\s*/g, '，')
+            .replace(/\s*\(\s*/g, '（')
+            .replace(/\s*\)\s*/g, '）');
+    }).join('');
 };
 
 export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<PostProcessResult> => {
@@ -1262,6 +1361,19 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
 
    updatedChapters = finalUpdateRecursive(updatedChapters);
 
+   // --- PHASE 5: FINAL PUNCTUATION CLEANUP (English -> Chinese) ---
+   // Must be done AFTER block processing to ensure placeholders are safe.
+   if (onLog) onLog(`Phase 5: 执行最终标点符号标准化 (English -> Chinese)...`);
+   updatedChapters = updatedChapters.map(ch => {
+       const fixRecursive = (c: Chapter): Chapter => ({
+           ...c,
+           content: c.content ? convertToChinesePunctuation(c.content) : undefined,
+           subsections: c.subsections ? c.subsections.map(fixRecursive) : []
+       });
+       return fixRecursive(ch);
+   });
+
+
    // Extract new global terms list for UI display
    const finalGlobalTerms = [...ctx.globalTerms];
    localTermsFound.forEach(lt => {
@@ -1278,6 +1390,7 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
    };
 };
 
+// ... [rest of file remains unchanged] ...
 // Helper: Extract contexts for references
 const extractReferenceContexts = (chapters: Chapter[]): Map<number, string> => {
     const contexts = new Map<number, string>();

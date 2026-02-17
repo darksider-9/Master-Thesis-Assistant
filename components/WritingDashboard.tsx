@@ -1,5 +1,6 @@
 
 
+
 import React, { useState, useRef, useEffect } from 'react';
 import { ThesisStructure, Chapter, FormatRules, Reference, AgentLog, ApiSettings, SectionPlan, SearchProvider, SearchResult, SearchHistoryItem, CitationStyle, SkeletonBlock, CitationStrategy } from '../types';
 import { writeSingleSection, writeSingleSectionQuickMode, runPostProcessingAgents, generateSkeletonPlan, polishDraftContent, finalizeAcademicStyle, filterSearchResultsAI, standardizeReferencesGlobal } from '../services/geminiService';
@@ -477,6 +478,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
               // 4. Write Section
               addLog('Writer', `[Auto-Pilot] 正在撰写正文...`, 'processing');
               
+              const targetWordCount = getAIContext(node.chapter).targetWordCount || 800;
+
               // Construct Instruction
               let constructedInstruction = `【严格遵循以下逻辑骨架进行撰写】\n\n写作蓝图: ${plan.writing_blueprint?.section_flow || "按顺序撰写"}\n\n`;
               plan.skeleton_blocks.forEach((block, idx) => {
@@ -502,13 +505,13 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                 settings: apiSettings,
                 discussionHistory: selectedChapter.chatHistory, 
                 fullChapterTree: thesis.chapters,
-                targetWordCount: getAIContext(node.chapter).targetWordCount || 800,
+                targetWordCount: targetWordCount,
                 chapterIndex: node.chapterIndex
               });
 
               // Polish & Finalize
-              content = await polishDraftContent(content, node.chapterIndex, apiSettings);
-              content = await finalizeAcademicStyle(content, node.chapterIndex, apiSettings);
+              content = await polishDraftContent(content, node.chapterIndex, apiSettings, targetWordCount);
+              content = await finalizeAcademicStyle(content, node.chapterIndex, apiSettings, targetWordCount);
               content = content.replace(/\n\s*(\[\[(?:SYM|REF):)/g, ' $1').replace(/(\]\])\s*\n/g, '$1 ');
 
               // Update Thesis State (One by one to show progress)
@@ -635,6 +638,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
 
       setLoadingNodes(prev => ({ ...prev, [nodeId]: true }));
       addLog('Writer', `Step 1/3: 正在基于骨架撰写: ${node.label}...`, 'processing');
+      const targetWordCount = getAIContext(node.chapter).targetWordCount || 800;
 
       let constructedInstruction = `【严格遵循以下逻辑骨架进行撰写】\n\n写作蓝图: ${plan.writing_blueprint?.section_flow || "按顺序撰写"}\n\n`;
       
@@ -677,17 +681,17 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
             settings: apiSettings,
             discussionHistory: selectedChapter.chatHistory, 
             fullChapterTree: thesis.chapters,
-            targetWordCount: getAIContext(node.chapter).targetWordCount || 800,
+            targetWordCount: targetWordCount,
             chapterIndex: node.chapterIndex // Pass index for numbering
           });
 
           // STEP 2: Logic Polish (With real-time numbering)
           addLog('Fixer', `Step 2/3: 逻辑润色与图表编号渲染...`, 'processing');
-          content = await polishDraftContent(content, node.chapterIndex, apiSettings);
+          content = await polishDraftContent(content, node.chapterIndex, apiSettings, targetWordCount);
 
           // STEP 3: Style Finalize
           addLog('Writer', `Step 3/3: 最终去AI味与格式定稿...`, 'processing');
-          content = await finalizeAcademicStyle(content, node.chapterIndex, apiSettings);
+          content = await finalizeAcademicStyle(content, node.chapterIndex, apiSettings, targetWordCount);
 
           content = content
             .replace(/\n\s*(\[\[(?:SYM|REF):)/g, ' $1')
@@ -718,6 +722,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
     const nodeId = node.chapter.id;
     setLoadingNodes(prev => ({ ...prev, [nodeId]: true }));
     addLog('Writer', `Step 1/3: 正在快速撰写: ${node.label} ${node.chapter.title} (Quick Mode)...`, 'processing');
+    const targetWordCount = getAIContext(node.chapter).targetWordCount || 800;
 
     try {
       const userInstruction = getAIContext(node.chapter).userInstruction || "";
@@ -735,17 +740,17 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
         settings: apiSettings,
         discussionHistory: selectedChapter.chatHistory, 
         fullChapterTree: thesis.chapters,
-        targetWordCount: getAIContext(node.chapter).targetWordCount || 800,
+        targetWordCount: targetWordCount,
         chapterIndex: node.chapterIndex // Pass index for numbering
       });
 
       // STEP 2: Logic Polish
       addLog('Fixer', `Step 2/3: 逻辑润色与图表编号渲染...`, 'processing');
-      content = await polishDraftContent(content, node.chapterIndex, apiSettings);
+      content = await polishDraftContent(content, node.chapterIndex, apiSettings, targetWordCount);
 
       // STEP 3: Style Finalize
       addLog('Writer', `Step 3/3: 最终去AI味与格式定稿...`, 'processing');
-      content = await finalizeAcademicStyle(content, node.chapterIndex, apiSettings);
+      content = await finalizeAcademicStyle(content, node.chapterIndex, apiSettings, targetWordCount);
 
       content = content
         .replace(/\n\s*(\[\[(?:SYM|REF):)/g, ' $1')
@@ -769,7 +774,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
   const handleCompleteChapter = async () => {
     if (!selectedChapter) return;
     setIsPostProcessing(true);
-    addLog('Supervisor', '启动章节智能校验 (AI术语识别/全局一致性)...', 'processing');
+    addLog('Supervisor', '启动章节智能校验 (AI术语识别/全局一致性/标点修复)...', 'processing');
 
     const allContent = nodes.map(n => n.chapter.content || "").join("\n\n");
     if (!allContent.trim()) {
@@ -1039,7 +1044,14 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                   }`}>
                                      {node.chapter.title}
                                   </span>
-                                  {hasContent && <span className="text-xs bg-green-100 text-green-600 px-2 py-0.5 rounded-full font-bold">已生成</span>}
+                                  {hasContent && (
+                                     <div className="flex items-center gap-2">
+                                        <span className="text-xs bg-green-100 text-green-600 px-2 py-0.5 rounded-full font-bold">已生成</span>
+                                        <span className="text-[10px] text-slate-400 font-mono">
+                                            {node.chapter.content!.length} 字
+                                        </span>
+                                     </div>
+                                  )}
                                </div>
                                
                                <div className="flex gap-2 items-center">
@@ -1135,7 +1147,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                                                             ? 'bg-white shadow text-purple-600 font-bold' 
                                                                             : 'text-slate-400 hover:text-slate-600'
                                                                         }`}
-                                                                        title={strat === 'search_new' ? '搜索新文献' : strat === 'use_existing' ? '引用已存' : '不引用'}
+                                                                        title={strat === 'search_new' ? '搜索新文献' : strat === 'use_existing' ? '📚 存' : '🚫 无'}
                                                                     >
                                                                         {strat === 'search_new' ? '🔍 搜' : strat === 'use_existing' ? '📚 存' : '🚫 无'}
                                                                     </button>
