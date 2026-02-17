@@ -1,12 +1,15 @@
 
 
 
+
+
 import React, { useState, useRef, useEffect } from 'react';
 import { ThesisStructure, Chapter, FormatRules, Reference, AgentLog, ApiSettings, SectionPlan, SearchProvider, SearchResult, SearchHistoryItem, CitationStyle, SkeletonBlock, CitationStrategy } from '../types';
 import { writeSingleSection, writeSingleSectionQuickMode, runPostProcessingAgents, generateSkeletonPlan, polishDraftContent, finalizeAcademicStyle, filterSearchResultsAI, standardizeReferencesGlobal } from '../services/geminiService';
 import { searchAcademicPapers, fetchDetailedRefMetadata, enrichReferenceMetadata } from '../services/searchService';
 import { generateContextEntry, formatCitation } from '../utils/citationFormatter';
 import SearchHistoryModal from './SearchHistoryModal';
+import SearchDebugger from './SearchDebugger';
 
 interface WritingDashboardProps {
   thesis: ThesisStructure;
@@ -79,6 +82,9 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
   
   // History Modal State
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  
+  // Debugger Modal State
+  const [isDebuggerOpen, setIsDebuggerOpen] = useState(false);
   
   // Auto Pilot State
   const [isAutoPiloting, setIsAutoPiloting] = useState(false);
@@ -367,108 +373,117 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                   const strategy = block.citation_strategy || 'search_new';
                   
                   if (strategy === 'search_new') {
-                       // Heuristic: If KeywordsZH exist, try search.
-                       const shouldSearch = block.slots.KeywordsZH && block.slots.KeywordsZH.length > 0;
-    
-                       if (shouldSearch) {
-                           const query = block.slots.KeywordsZH![0]; // Use first recommended query set
-                           addLog('Searcher', `[Auto-Pilot] 正在多源检索逻辑块 "${block.slots.Claim.slice(0,15)}...": ${query}`, 'processing');
-                           
-                           const providersToTry: SearchProvider[] = ['open_alex', 'arxiv', 'crossref', 'semantic_scholar'];
-                           
-                           if (searchProvider === 'serper' && searchApiKey) {
-                               providersToTry.push('serper');
-                           }
-    
-                           try {
-                               // Parallel Fetch
-                               const resultsPromises = providersToTry.map(p => {
-                                   const keyToUse = (p === searchProvider || (p === 'semantic_scholar' && searchProvider === 'semantic_scholar')) ? searchApiKey : undefined;
-                                   return searchAcademicPapers(query, p, keyToUse).catch(e => {
-                                       console.warn(`Provider ${p} failed`, e);
-                                       return [] as SearchResult[];
-                                   });
-                               });
-    
-                               const resultsArrays = await Promise.all(resultsPromises);
-                               let aggregatedResults = resultsArrays.flat();
-                               
-                               // Deduplicate
-                               const seenTitles = new Set();
-                               aggregatedResults = aggregatedResults.filter(r => {
-                                   const normTitle = r.title.toLowerCase().replace(/\s+/g, '');
-                                   if (seenTitles.has(normTitle)) return false;
-                                   seenTitles.add(normTitle);
-                                   return true;
-                               });
-    
-                               if (aggregatedResults.length > 0) {
-                                   addLog('Searcher', `[Auto-Pilot] 汇总检索到 ${aggregatedResults.length} 篇文献，正在进行 AI 智能筛选...`, 'processing');
-                                   
-                                   // PERSISTENCE FIX: Save to Search History
-                                   setSearchHistory(prev => [...prev, {
-                                        id: Date.now().toString() + Math.random(),
-                                        timestamp: Date.now(),
-                                        query: query,
-                                        provider: 'open_alex', // Approximation since we mixed providers
-                                        results: aggregatedResults,
-                                        blockId: block.block_id
-                                   }]);
+                       // NEW LOGIC: Use BOTH English and Chinese Keywords
+                       const queriesToRun: string[] = [];
+                       if (block.slots.KeywordsEN && block.slots.KeywordsEN.length > 0) {
+                           queriesToRun.push(...block.slots.KeywordsEN.slice(0, 2)); // Top 2 English
+                       }
+                       if (block.slots.KeywordsZH && block.slots.KeywordsZH.length > 0) {
+                           queriesToRun.push(block.slots.KeywordsZH[0]); // Top 1 Chinese
+                       }
+                       
+                       const uniqueQueries = Array.from(new Set(queriesToRun)); // Dedupe
 
-                                   const selectedIds = await filterSearchResultsAI(block.slots.Claim, aggregatedResults, apiSettings);
-                                   
-                                   if (selectedIds.length > 0) {
-                                       addLog('Searcher', `[Auto-Pilot] AI 选中 ${selectedIds.length} 篇高相关文献`, 'success');
-                                       
-                                       const selectedPapers = aggregatedResults.filter(r => selectedIds.includes(r.id));
-                                       
-                                       for (const paper of selectedPapers) {
-                                           // Check/Add to Global
-                                           let existingRef = references.find(r => 
-                                                r.description.includes(paper.title) || paper.title.includes(r.description)
-                                           );
-                                           
-                                           // --- NEW: Strict Metadata Enrichment for Auto-Pilot ---
-                                           if (!existingRef) {
-                                                // We found a new paper. We must enrich it to ensure perfect metadata.
-                                                addLog('Reference', `[Auto-Pilot] 正在全网验证并补全元数据: "${paper.title.slice(0,20)}..."`, 'processing');
-                                                
-                                                // Use Strict Mode (True) because we know the title from the selected paper
-                                                const perfectMeta = await enrichReferenceMetadata(paper.title, apiSettings, true);
-                                                
-                                                // Quick format
-                                                const formattedDesc = formatCitation(paper, citationStyle);
-                                                const newId = references.length > 0 ? Math.max(...references.map(r => r.id)) + 1 : 1;
-                                                
-                                                const newRef: Reference = {
-                                                    id: newId,
-                                                    description: formattedDesc,
-                                                    // Prefer perfect metadata if found, otherwise fallback to search result
-                                                    metadata: perfectMeta || { 
-                                                        title: paper.title,
-                                                        authors: paper.authors,
-                                                        year: paper.year,
-                                                        journal: paper.venue
-                                                    }
-                                                };
-                                                setReferences(prev => [...prev, newRef]);
-                                                // Append to context
-                                                combinedContext += generateContextEntry(paper, citationStyle, newId);
-                                           } else {
-                                                combinedContext += `[Ref Existing ID:${existingRef.id}] Title: ${paper.title}\n`;
-                                           }
-                                       }
-                                       // PERSISTENCE FIX: Save accumulated context
-                                       updateChapterAIContext(nodeId, { referenceInput: combinedContext });
+                       if (uniqueQueries.length > 0) {
+                           addLog('Searcher', `[Auto-Pilot] 正在多源检索逻辑块 "${block.slots.Claim.slice(0,15)}...": ${uniqueQueries.join(", ")}`, 'processing');
+                           
+                           let allFoundPapers: SearchResult[] = [];
 
-                                   } else {
-                                       addLog('Searcher', `[Auto-Pilot] AI 判定无相关文献，跳过引用`, 'warning');
-                                   }
+                           // Iterate queries (sequential to be polite, or parallel if brave)
+                           for (const query of uniqueQueries) {
+                               const providersToTry: SearchProvider[] = ['open_alex', 'arxiv', 'crossref', 'semantic_scholar'];
+                               if (searchProvider === 'serper' && searchApiKey) {
+                                   providersToTry.push('serper');
                                }
-                           } catch (e) {
-                               console.error(e);
+
+                               try {
+                                   const resultsPromises = providersToTry.map(p => {
+                                       const keyToUse = (p === searchProvider || (p === 'semantic_scholar' && searchProvider === 'semantic_scholar')) ? searchApiKey : undefined;
+                                       return searchAcademicPapers(query, p, keyToUse).catch(e => {
+                                           console.warn(`Provider ${p} failed for query ${query}`, e);
+                                           return [] as SearchResult[];
+                                       });
+                                   });
+                                   const resultsArrays = await Promise.all(resultsPromises);
+                                   allFoundPapers = [...allFoundPapers, ...resultsArrays.flat()];
+                               } catch (e) {
+                                   console.error(e);
+                               }
                            }
-                      }
+                           
+                           // Deduplicate
+                           const seenTitles = new Set();
+                           let aggregatedResults = allFoundPapers.filter(r => {
+                               const normTitle = r.title.toLowerCase().replace(/\s+/g, '');
+                               if (seenTitles.has(normTitle)) return false;
+                               seenTitles.add(normTitle);
+                               return true;
+                           });
+    
+                           if (aggregatedResults.length > 0) {
+                               addLog('Searcher', `[Auto-Pilot] 汇总检索到 ${aggregatedResults.length} 篇文献，正在进行 AI 智能筛选...`, 'processing');
+                               
+                               // PERSISTENCE FIX: Save to Search History (Use the first query as label)
+                               setSearchHistory(prev => [...prev, {
+                                    id: Date.now().toString() + Math.random(),
+                                    timestamp: Date.now(),
+                                    query: uniqueQueries[0] + " (+others)",
+                                    provider: 'open_alex', // Approximation since we mixed providers
+                                    results: aggregatedResults,
+                                    blockId: block.block_id
+                               }]);
+
+                               const selectedIds = await filterSearchResultsAI(block.slots.Claim, aggregatedResults, apiSettings);
+                               
+                               if (selectedIds.length > 0) {
+                                   addLog('Searcher', `[Auto-Pilot] AI 选中 ${selectedIds.length} 篇高相关文献`, 'success');
+                                   
+                                   const selectedPapers = aggregatedResults.filter(r => selectedIds.includes(r.id));
+                                   
+                                   for (const paper of selectedPapers) {
+                                       // Check/Add to Global
+                                       let existingRef = references.find(r => 
+                                            r.description.includes(paper.title) || paper.title.includes(r.description)
+                                       );
+                                       
+                                       // --- NEW: Strict Metadata Enrichment for Auto-Pilot ---
+                                       if (!existingRef) {
+                                            // We found a new paper. We must enrich it to ensure perfect metadata.
+                                            addLog('Reference', `[Auto-Pilot] 正在全网验证并补全元数据: "${paper.title.slice(0,20)}..."`, 'processing');
+                                            
+                                            // Use Strict Mode (True) because we know the title from the selected paper
+                                            const perfectMeta = await enrichReferenceMetadata(paper.title, apiSettings, true);
+                                            
+                                            // Quick format
+                                            const formattedDesc = formatCitation(paper, citationStyle);
+                                            const newId = references.length > 0 ? Math.max(...references.map(r => r.id)) + 1 : 1;
+                                            
+                                            const newRef: Reference = {
+                                                id: newId,
+                                                description: formattedDesc,
+                                                // Prefer perfect metadata if found, otherwise fallback to search result
+                                                metadata: perfectMeta || { 
+                                                    title: paper.title,
+                                                    authors: paper.authors,
+                                                    year: paper.year,
+                                                    journal: paper.venue
+                                                }
+                                            };
+                                            setReferences(prev => [...prev, newRef]);
+                                            // Append to context
+                                            combinedContext += generateContextEntry(paper, citationStyle, newId);
+                                       } else {
+                                            combinedContext += `[Ref Existing ID:${existingRef.id}] Title: ${paper.title}\n`;
+                                       }
+                                   }
+                                   // PERSISTENCE FIX: Save accumulated context
+                                   updateChapterAIContext(nodeId, { referenceInput: combinedContext });
+
+                               } else {
+                                   addLog('Searcher', `[Auto-Pilot] AI 判定无相关文献，跳过引用`, 'warning');
+                               }
+                           }
+                       }
                   } else if (strategy === 'use_existing') {
                        // Logic handled in prompt instructions to use global refs
                        addLog('Searcher', `[Auto-Pilot] 策略设为“引用已有”，跳过搜索`, 'processing');
@@ -868,6 +883,15 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
           }}
       />
 
+      <SearchDebugger 
+          isOpen={isDebuggerOpen}
+          onClose={() => setIsDebuggerOpen(false)}
+          apiSettings={apiSettings}
+          references={references}
+          setReferences={setReferences}
+          citationStyle={citationStyle}
+      />
+
       <div className="w-60 bg-white rounded-xl border shadow-sm flex flex-col overflow-hidden shrink-0">
         <div className="p-4 bg-slate-50 border-b font-bold text-slate-700">章节目录</div>
         <div className="flex-1 overflow-y-auto p-2 space-y-2">
@@ -914,6 +938,12 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
             </div>
             
             <div className="flex items-center gap-3">
+                <button 
+                    onClick={() => setIsDebuggerOpen(true)}
+                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors border border-slate-200 flex items-center gap-1"
+                >
+                    🐞 搜索调试
+                </button>
                 <button 
                     onClick={() => setIsHistoryOpen(true)}
                     className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors border border-slate-200"

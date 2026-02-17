@@ -1,5 +1,6 @@
 
 
+
 import { GoogleGenAI } from "@google/genai";
 import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings, ThesisStructure, SkeletonResponse, SearchResult, CitationStyle } from "../types";
 import { fetchDetailedRefMetadata, searchAcademicPapers, enrichReferenceMetadata } from "./searchService";
@@ -1364,7 +1365,7 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
    // --- PHASE 5: FINAL PUNCTUATION CLEANUP (English -> Chinese) ---
    // Must be done AFTER block processing to ensure placeholders are safe.
    if (onLog) onLog(`Phase 5: 执行最终标点符号标准化 (English -> Chinese)...`);
-   updatedChapters = updatedChapters.map(ch => {
+   updatedChapters = updatedChapters.map((ch: Chapter) => {
        const fixRecursive = (c: Chapter): Chapter => ({
            ...c,
            content: c.content ? convertToChinesePunctuation(c.content) : undefined,
