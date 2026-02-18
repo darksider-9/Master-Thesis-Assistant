@@ -1,5 +1,19 @@
 import { GoogleGenAI } from "@google/genai";
-import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings, ThesisStructure, SkeletonResponse, SearchResult, CitationStyle } from "../types";
+import { 
+  Chapter, 
+  FormatRules, 
+  TechnicalTerm, 
+  Reference, 
+  ChatMessage, 
+  InterviewData, 
+  ApiSettings, 
+  ThesisStructure, 
+  SkeletonResponse, 
+  SearchResult, 
+  CitationStyle,
+  PostProcessContext,
+  PostProcessResult 
+} from "../types";
 import { fetchDetailedRefMetadata, searchAcademicPapers, enrichReferenceMetadata } from "./searchService";
 import { formatCitation } from "../utils/citationFormatter";
 
@@ -815,14 +829,18 @@ export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
   if (meta.resultsAnalysis) metadataContext += `\n- 结果分析 (Results): ${meta.resultsAnalysis}`;
 
   let visualPlanContext = "";
-  if (meta.figurePlan && meta.figurePlan.length > 0) {
+  // SAFE ARRAY CHECK FIX
+  const figurePlan = (meta.figurePlan && Array.isArray(meta.figurePlan)) ? meta.figurePlan : [];
+  if (figurePlan.length > 0) {
       visualPlanContext += `\n【必须落实的图表规划 (Mandatory Visuals)】\n请在正文适当位置自然地插入以下图表（必须使用标准占位符 \`[[FIG:描述]]\`）：\n`;
-      meta.figurePlan.forEach(f => visualPlanContext += `- ${f}\n`);
+      figurePlan.forEach(f => visualPlanContext += `- ${f}\n`);
   }
-  if (meta.tablePlan && meta.tablePlan.length > 0) {
+  
+  const tablePlan = (meta.tablePlan && Array.isArray(meta.tablePlan)) ? meta.tablePlan : [];
+  if (tablePlan.length > 0) {
       if (!visualPlanContext) visualPlanContext += `\n【必须落实的图表规划 (Mandatory Visuals)】\n`;
       visualPlanContext += `请在正文适当位置自然地插入以下表格（必须使用标准占位符 \`[[TBL:描述]]\`）：\n`;
-      meta.tablePlan.forEach(t => visualPlanContext += `- ${t}\n`);
+      tablePlan.forEach(t => visualPlanContext += `- ${t}\n`);
   }
   // Add strict instruction if visuals exist
   if (visualPlanContext) {
@@ -870,16 +888,11 @@ export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
        - **Strict Format**: \`[[REF:KEYWORD_PLACEHOLDER: Author Year Topic]]\`.
        - **禁止**：严禁自己编造数字ID（如[99]），严禁生成虚假的完整引用格式。只生成关键词描述。
        - 系统后续会自动根据这些关键词去匹配或创建新的引用条目。
-    **⚠️ 严禁滥用引用 ID (Strict Granularity Rule)**：
-            只有当【已存文献】与你当前想引用的内容在**概念层级**上完全一致时，才允许复用。
-    **举例说明（必须遵守）**：
-    - **场景 1 (U-Net)**: 
-      - 如果文中提到 "使用 U-Net 进行分割"，且全局库中有 *Ronneberger et al. U-Net...*，则**必须**复用该参考文献。
-      - 如果全局库中只有一本通用的《深度学习》教材，**绝对禁止**引用它来佐证 "U-Net" 的具体细节，必须新建引用 \`[[REF:KEYWORD_PLACEHOLDER: Ronneberger 2015 U-Net]]\`。
-    - **场景 2 (L1/L2 Loss)**:
-      - 如果 L1 Loss 和 L2 Loss 的定义出自同一篇综述文章，且该文章已在库中，则两者可以共用同一个 ID。
-      - 如果文中讨论的是 "Focal Loss"，而库中只有 "Cross Entropy Loss" 的文献，**禁止**复用，必须新建。
     
+    **⚠️ 重要：引用分布原则**
+    - **严禁堆砌**：不要将所有引用集中在第一段。
+    - **逻辑对应**：请确保引用出现在具体的论点或方法描述之后。例如，提到某个具体损失函数改进时，再引用相关文献，而不是在引言里一次性列出。
+
     **操作指令**:
     1. **复用**: 只有确认颗粒度匹配时，使用 \`[[REF:ID]]\` (如 [[REF:12]])。
     2. **新增**: 如果库中没有匹配层级的文献，使用 \`[[REF:KEYWORD_PLACEHOLDER: 详细关键词]]\`。
@@ -960,15 +973,20 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
   if (meta.resultsAnalysis) metadataContext += `\n- 结果分析 (Results): ${meta.resultsAnalysis}`;
 
   let visualPlanContext = "";
-  if (meta.figurePlan && meta.figurePlan.length > 0) {
+  // SAFE ARRAY CHECK FIX
+  const figurePlan = (meta.figurePlan && Array.isArray(meta.figurePlan)) ? meta.figurePlan : [];
+  if (figurePlan.length > 0) {
       visualPlanContext += `\n【必须落实的图表规划 (Mandatory Visuals)】\n请在正文适当位置自然地插入以下图表（必须使用标准占位符 \`[[FIG:描述]]\`）：\n`;
-      meta.figurePlan.forEach(f => visualPlanContext += `- ${f}\n`);
+      figurePlan.forEach(f => visualPlanContext += `- ${f}\n`);
   }
-  if (meta.tablePlan && meta.tablePlan.length > 0) {
+  
+  const tablePlan = (meta.tablePlan && Array.isArray(meta.tablePlan)) ? meta.tablePlan : [];
+  if (tablePlan.length > 0) {
       if (!visualPlanContext) visualPlanContext += `\n【必须落实的图表规划 (Mandatory Visuals)】\n`;
       visualPlanContext += `请在正文适当位置自然地插入以下表格（必须使用标准占位符 \`[[TBL:描述]]\`）：\n`;
-      meta.tablePlan.forEach(t => visualPlanContext += `- ${t}\n`);
+      tablePlan.forEach(t => visualPlanContext += `- ${t}\n`);
   }
+  
   // Add strict instruction if visuals exist
   if (visualPlanContext) {
       visualPlanContext += `\n**注意**：你必须在正文中明确插入上述图表占位符，严禁遗漏！`;
@@ -1017,6 +1035,10 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
     **⚠️ 严禁滥用引用 ID (Strict Granularity Rule)**：
     只有当【已存文献】与你当前想引用的内容在**概念层级**上完全一致时，才允许复用 ID。
     
+    **⚠️ 重要：引用分布原则**
+    - **严禁堆砌**：不要将所有引用集中在第一段。
+    - **逻辑对应**：请确保引用出现在具体的论点或方法描述之后。例如，提到某个具体损失函数改进时，再引用相关文献，而不是在引言里一次性列出。
+    
     **举例说明（必须遵守）**：
     - **场景 1 (U-Net)**: 
       - 如果文中提到 "使用 U-Net 进行分割"，且全局库中有 *Ronneberger et al. U-Net...*，则**必须**复用该 ID。
@@ -1057,26 +1079,7 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
   }
 };
 
-// --- COMPLEX POST-PROCESSING WITH AI AGENTS (RESTORED) ---
-
-interface PostProcessContext {
-    fullText: string; 
-    chapterId: string;
-    allChapters: Chapter[];
-    globalReferences: Reference[];
-    globalTerms: TechnicalTerm[]; // UPDATED TYPE
-    settings: ApiSettings;
-    onLog?: (msg: string) => void;
-    citationStyle?: CitationStyle;
-}
-
-interface PostProcessResult {
-    updatedText: string;
-    updatedReferences: Reference[];
-    updatedTerms: TechnicalTerm[];
-    updatedChapters: Chapter[]; 
-}
-
+// ... [Post Processing Code remains unchanged] ...
 // Helper: Flatten chapters to find order
 const flattenChapters = (chapters: Chapter[]): Chapter[] => {
     let list: Chapter[] = [];

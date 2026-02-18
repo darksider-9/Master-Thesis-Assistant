@@ -1,6 +1,5 @@
 
 
-
 export interface ReferenceMetadata {
   title: string;
   authors: string[];
@@ -291,4 +290,24 @@ export interface SectionPlan {
 
 export interface SkeletonResponse {
   section_plans: SectionPlan[];
+}
+
+// --- Service Types ---
+
+export interface PostProcessContext {
+    fullText: string;
+    chapterId: string;
+    allChapters: Chapter[];
+    globalReferences: Reference[];
+    globalTerms: TechnicalTerm[];
+    settings: ApiSettings;
+    onLog?: (message: string) => void;
+    citationStyle?: CitationStyle;
+}
+
+export interface PostProcessResult {
+    updatedText: string;
+    updatedReferences: Reference[];
+    updatedTerms: TechnicalTerm[];
+    updatedChapters: Chapter[];
 }

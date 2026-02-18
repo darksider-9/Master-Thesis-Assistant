@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect } from 'react';
 import { ThesisStructure, Chapter, FormatRules, Reference, AgentLog, ApiSettings, SectionPlan, SearchProvider, SearchResult, SearchHistoryItem, CitationStyle, SkeletonBlock, CitationStrategy, TechnicalTerm } from '../types';
 import { writeSingleSection, writeSingleSectionQuickMode, runPostProcessingAgents, generateSkeletonPlan, polishDraftContent, finalizeAcademicStyle, filterSearchResultsAI, standardizeReferencesGlobal } from '../services/geminiService';
@@ -412,8 +411,9 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
 
               // 2. Search & Filter & Context Assembly
               let combinedContext = getAIContext(node.chapter).referenceInput || "";
+              const blockContextMap = new Map<string, string>(); // NEW: Track context per block
 
-              for (const block of plan.skeleton_blocks) {
+              for (const [idx, block] of plan.skeleton_blocks.entries()) {
                   // Strategy Check: Auto-Pilot defaults to 'search_new' if not set
                   const strategy = block.citation_strategy || 'search_new';
                   
@@ -430,7 +430,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                        const uniqueQueries = Array.from(new Set(queriesToRun)); // Dedupe
 
                        if (uniqueQueries.length > 0) {
-                           addLog('Searcher', `[Auto-Pilot] 正在多源检索逻辑块 "${block.slots.Claim.slice(0,15)}...": ${uniqueQueries.join(", ")}`, 'processing');
+                           addLog('Searcher', `[Auto-Pilot] 正在多源检索逻辑块 ${idx + 1} "${block.slots.Claim.slice(0,15)}...": ${uniqueQueries.join(", ")}`, 'processing');
                            
                            let allFoundPapers: SearchResult[] = [];
 
@@ -466,8 +466,6 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                            });
     
                            if (aggregatedResults.length > 0) {
-                               addLog('Searcher', `[Auto-Pilot] 汇总检索到 ${aggregatedResults.length} 篇文献，正在进行 AI 智能筛选...`, 'processing');
-                               
                                // PERSISTENCE FIX: Save to Search History (Use the first query as label)
                                setSearchHistory(prev => [...prev, {
                                     id: Date.now().toString() + Math.random(),
@@ -481,10 +479,11 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                const selectedIds = await filterSearchResultsAI(block.slots.Claim, aggregatedResults, apiSettings);
                                
                                if (selectedIds.length > 0) {
-                                   addLog('Searcher', `[Auto-Pilot] AI 选中 ${selectedIds.length} 篇高相关文献`, 'success');
+                                   addLog('Searcher', `[Auto-Pilot] AI 选中 ${selectedIds.length} 篇高相关文献 (Block ${idx + 1})`, 'success');
                                    
                                    const selectedPapers = aggregatedResults.filter(r => selectedIds.includes(r.id));
-                                   
+                                   let currentBlockContext = ""; // NEW: Local context for this block
+
                                    for (const paper of selectedPapers) {
                                        // Check/Add to Global
                                        let existingRef = references.find(r => 
@@ -492,6 +491,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                        );
                                        
                                        // --- NEW: Strict Metadata Enrichment for Auto-Pilot ---
+                                       let refIdToUse = 0;
+                                       
                                        if (!existingRef) {
                                             // We found a new paper. We must enrich it to ensure perfect metadata.
                                             addLog('Reference', `[Auto-Pilot] 正在全网验证并补全元数据: "${paper.title.slice(0,20)}..."`, 'processing');
@@ -515,40 +516,56 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                                 }
                                             };
                                             setReferences(prev => [...prev, newRef]);
-                                            // Append to context
-                                            combinedContext += generateContextEntry(paper, citationStyle, newId);
+                                            refIdToUse = newId;
+                                            
+                                            // Append to GLOBAL accumulator for UI Persistence
+                                            const entry = generateContextEntry(paper, citationStyle, newId);
+                                            combinedContext += entry;
+                                            currentBlockContext += entry; // Add to local block context
                                        } else {
-                                            combinedContext += `[Ref Existing ID:${existingRef.id}] Title: ${paper.title}\n`;
+                                            refIdToUse = existingRef.id;
+                                            const entry = `[Ref Existing ID:${existingRef.id}] Title: ${paper.title}\n`;
+                                            combinedContext += entry;
+                                            currentBlockContext += entry; // Add to local block context
                                        }
                                    }
-                                   // PERSISTENCE FIX: Save accumulated context
-                                   updateChapterAIContext(nodeId, { referenceInput: combinedContext });
+                                   
+                                   blockContextMap.set(block.block_id, currentBlockContext);
 
                                } else {
-                                   addLog('Searcher', `[Auto-Pilot] AI 判定无相关文献，跳过引用`, 'warning');
+                                   addLog('Searcher', `[Auto-Pilot] AI 判定无相关文献 (Block ${idx + 1})`, 'warning');
                                }
                            }
                        }
                   } else if (strategy === 'use_existing') {
-                       // Logic handled in prompt instructions to use global refs
-                       addLog('Searcher', `[Auto-Pilot] 策略设为“引用已有”，跳过搜索`, 'processing');
+                       addLog('Searcher', `[Auto-Pilot] Block ${idx + 1} 策略设为“引用已有”，跳过搜索`, 'processing');
                   }
-              }
+              } // End Block Loop
+
+              // PERSISTENCE FIX: Save accumulated context
+              updateChapterAIContext(nodeId, { referenceInput: combinedContext });
 
               // 4. Write Section
               addLog('Writer', `[Auto-Pilot] 正在撰写正文...`, 'processing');
               
               const targetWordCount = getAIContext(node.chapter).targetWordCount || 800;
 
-              // Construct Instruction
+              // Construct Instruction with interleaved citations
               let constructedInstruction = `【严格遵循以下逻辑骨架进行撰写】\n\n写作蓝图: ${plan.writing_blueprint?.section_flow || "按顺序撰写"}\n\n`;
-              plan.skeleton_blocks.forEach((block, idx) => {
-                 constructedInstruction += `[BLOCK ${idx + 1}: ${block.move}]\n- Claim: ${block.slots.Claim}\n- Style: ${block.style_notes}\n`;
-              });
               
-              if (combinedContext) {
-                  constructedInstruction += `\n【自动检索到的相关文献素材 (Global Search)】\n${combinedContext}\n请根据Claim合理选用，若素材不足则进行理论推演。`;
-              }
+              plan.skeleton_blocks.forEach((block, idx) => {
+                  constructedInstruction += `[BLOCK ${idx + 1}: ${block.move}]\n- Claim: ${block.slots.Claim}\n- Style: ${block.style_notes}\n`;
+                  
+                  // NEW: Inject specific context for this block
+                  const specificContext = blockContextMap.get(block.block_id);
+                  if (specificContext) {
+                      constructedInstruction += `【本段专用文献素材】\n${specificContext}\n请务必综合上述素材进行论述，并正确标注引用。\n`;
+                  } else {
+                      constructedInstruction += `(无特定文献，请进行理论推演)\n`;
+                  }
+                  constructedInstruction += `\n`;
+              });
+
               const userInst = getAIContext(node.chapter).userInstruction;
               if (userInst) {
                   constructedInstruction += `\n【用户额外指令】\n${userInst}`;
@@ -592,6 +609,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
           
       } catch (e) {
           addLog('Supervisor', `Auto-Pilot 异常中断: ${e}`, 'error');
+          console.error(e); // Added console error for debugging
       } finally {
           setIsAutoPiloting(false);
       }
