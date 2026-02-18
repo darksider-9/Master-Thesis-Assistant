@@ -366,6 +366,12 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
           return;
       }
 
+      // --- CRITICAL FIX START: Local Mutable References List ---
+      // We use this local list to track references across multiple async steps in the loop.
+      // This prevents the "Stale Closure" issue where `references` state doesn't update fast enough between blocks.
+      let tempSessionRefs = [...references];
+      // --- CRITICAL FIX END ---
+
       try {
           // Iterate sequentially
           for (const node of targetNodes) {
@@ -485,12 +491,11 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                    let currentBlockContext = ""; // NEW: Local context for this block
 
                                    for (const paper of selectedPapers) {
-                                       // Check/Add to Global
-                                       let existingRef = references.find(r => 
+                                       // --- FIX: USE tempSessionRefs INSTEAD OF references ---
+                                       let existingRef = tempSessionRefs.find(r => 
                                             r.description.includes(paper.title) || paper.title.includes(r.description)
                                        );
                                        
-                                       // --- NEW: Strict Metadata Enrichment for Auto-Pilot ---
                                        let refIdToUse = 0;
                                        
                                        if (!existingRef) {
@@ -502,7 +507,9 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                             
                                             // Quick format
                                             const formattedDesc = formatCitation(paper, citationStyle);
-                                            const newId = references.length > 0 ? Math.max(...references.map(r => r.id)) + 1 : 1;
+                                            
+                                            // --- FIX: CALCULATE ID FROM tempSessionRefs ---
+                                            const newId = tempSessionRefs.length > 0 ? Math.max(...tempSessionRefs.map(r => r.id)) + 1 : 1;
                                             
                                             const newRef: Reference = {
                                                 id: newId,
@@ -515,7 +522,11 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                                                     journal: paper.venue
                                                 }
                                             };
-                                            setReferences(prev => [...prev, newRef]);
+                                            
+                                            // --- FIX: UPDATE LOCAL AND GLOBAL STATE ---
+                                            tempSessionRefs.push(newRef); // Sync local tracker
+                                            setReferences(prev => [...prev, newRef]); // Sync UI (will happen eventually)
+                                            
                                             refIdToUse = newId;
                                             
                                             // Append to GLOBAL accumulator for UI Persistence
@@ -578,7 +589,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                 targetSection: node.chapter,
                 userInstructions: constructedInstruction,
                 formatRules,
-                globalRefs: references, 
+                globalRefs: tempSessionRefs, // --- FIX: PASS UP-TO-DATE REFS TO WRITER ---
                 settings: apiSettings,
                 discussionHistory: selectedChapter.chatHistory, 
                 fullChapterTree: thesis.chapters,
