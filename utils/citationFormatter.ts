@@ -1,41 +1,88 @@
+import { SearchResult, CitationStyle, ReferenceMetadata } from "../types";
 
-import { SearchResult, CitationStyle } from "../types";
+// Helper to check if an object is likely a full metadata object
+const isMetadata = (data: any): data is ReferenceMetadata => {
+    return data && typeof data.title === 'string';
+};
 
-export const formatCitation = (paper: SearchResult, style: CitationStyle): string => {
-    const authors = paper.authors.length > 0 ? paper.authors.join(", ") : "Unknown Author";
-    const firstAuthor = paper.authors[0] || "Unknown";
-    const etAl = paper.authors.length > 1 ? " et al." : "";
-    const etAlZh = paper.authors.length > 3 ? "等" : ""; // Simplified logic
+export const formatCitation = (paperOrMeta: SearchResult | ReferenceMetadata, style: CitationStyle): string => {
+    // Unify input to ReferenceMetadata-like structure
+    const title = paperOrMeta.title;
+    const authors = paperOrMeta.authors || [];
+    const year = (paperOrMeta as any).year || (paperOrMeta as any).publicationDate?.substring(0,4) || "N/A";
+    const journal = (paperOrMeta as any).venue || (paperOrMeta as any).journal || "Unknown Journal";
+    const url = (paperOrMeta as any).url || "";
     
-    // Clean abstract for raw usage
-    const cleanAbstract = paper.abstract ? paper.abstract.replace(/\s+/g, ' ').trim() : "（无摘要）";
+    // Detailed fields (often missing in raw search, but present after enrichment)
+    const volume = (paperOrMeta as any).volume || "";
+    const issue = (paperOrMeta as any).issue || "";
+    const pages = (paperOrMeta as any).pages || "";
+    const doi = (paperOrMeta as any).doi || "";
 
-    // Venue fallback
-    const venue = paper.venue || "Journal/Conference";
-
+    const authorsStr = authors.length > 0 ? authors.join(", ") : "Unknown Author";
+    const firstAuthor = authors[0] || "Unknown";
+    const etAl = authors.length > 1 ? " et al." : "";
+    
     switch (style) {
         case 'GB/T 7714':
-            // Basic approximation of GB/T 7714-2015
-            // [序号] 主要责任者. 题名: 其他题名信息[文献类型标志]. 其他责任者. 版本项. 出版地: 出版者, 出版年: 引文页码[引用日期]. 获取和访问路径.
-            // Example: [1] Canny J. A computational approach to edge detection[J]. IEEE Transactions on pattern analysis and machine intelligence, 1986 (6): 679-698.
-            // Since we often lack specific volume/issue/pages from simple APIs, we do our best.
-            const authorsGB = paper.authors.slice(0, 3).map(a => a.toUpperCase()).join(", ") + (paper.authors.length > 3 ? ", et al" : "");
-            return `${authorsGB}. ${paper.title}[J]. ${venue}, ${paper.year}.`;
+            // Format: [序号] 主要责任者. 题名[J]. 刊名, 年, 卷(期): 起止页码.
+            // Authors: First 3, uppercase surnames
+            const gbAuthors = authors.slice(0, 3).map(name => {
+                // Try to uppercase surname if possible (heuristic)
+                // Assuming "First Last" or "Last, First"
+                if (name.includes(',')) return name.toUpperCase(); // Already Last, First
+                const parts = name.split(' ');
+                if (parts.length > 1) {
+                    const last = parts.pop();
+                    return `${last!.toUpperCase()} ${parts.join(' ').toUpperCase()}`; // LAST FIRST
+                }
+                return name.toUpperCase();
+            });
+            
+            const authorPart = gbAuthors.join(", ") + (authors.length > 3 ? ", et al" : "");
+            
+            let details = `${year}`;
+            if (volume) details += `, ${volume}`;
+            if (issue) details += `(${issue})`;
+            if (pages) details += `: ${pages}`;
+            
+            // Heuristic for type: Journal [J], Conference [C]
+            // If we have volume/issue it's likely a Journal.
+            const typeMark = (volume && issue) ? '[J]' : '[C]'; 
+
+            return `${authorPart}. ${title}${typeMark}. ${journal}, ${details}.`;
 
         case 'APA':
-            // Author, A. A., & Author, B. B. (Year). Title of the article. Name of the Periodical, volume(issue), #–#. https://doi.org/xxxx
-            return `${authors}. (${paper.year}). ${paper.title}. ${venue}. ${paper.url ? paper.url : ''}`;
+            // Author, A. A., & Author, B. B. (Year). Title of the article. Name of the Periodical, volume(issue), pp–pp. https://doi.org/xx
+            let apaDetails = "";
+            if (volume) apaDetails += `, ${volume}`;
+            if (issue) apaDetails += `(${issue})`;
+            if (pages) apaDetails += `, ${pages}`;
+            
+            const doiStr = doi ? ` https://doi.org/${doi}` : (url ? ` ${url}` : '');
+            
+            return `${authorsStr} (${year}). ${title}. ${journal}${apaDetails}.${doiStr}`;
 
         case 'IEEE':
-            // [1] J. K. Author, “Title of the paper,” Abbrev. Title of Periodical, vol. x, no. x, pp. xxx-xxx, Abbrev. Month, year.
-            return `${firstAuthor}${etAl}, "${paper.title}," ${venue}, ${paper.year}.`;
+            // J. K. Author, “Title of paper,” Abbrev. Title of Periodical, vol. x, no. x, pp. xxx-xxx, Abbrev. Month, year.
+            let ieeeDetails = "";
+            if (volume) ieeeDetails += `, vol. ${volume}`;
+            if (issue) ieeeDetails += `, no. ${issue}`;
+            if (pages) ieeeDetails += `, pp. ${pages}`;
+            
+            return `${firstAuthor}${etAl}, "${title}," ${journal}${ieeeDetails}, ${year}.`;
 
         case 'MLA':
-            // Author. "Title of Source." Title of Container, Other Contributors, Version, Number, Publisher, Publication Date, Location.
-            return `${firstAuthor}${etAl}. "${paper.title}." ${venue}, ${paper.year}.`;
+            // Author. "Title." Title of Container, vol. 1, no. 1, Year, pp. 1-10.
+            let mlaDetails = `${year}`;
+            if (volume) mlaDetails = `vol. ${volume}, ` + mlaDetails;
+            if (issue) mlaDetails = `no. ${issue}, ` + mlaDetails; // order roughly vol, no, year
+            if (pages) mlaDetails += `, pp. ${pages}`;
+
+            return `${firstAuthor}${etAl}. "${title}." ${journal}, ${mlaDetails}.`;
 
         default:
-            return `${authors}. ${paper.title}. ${paper.year}.`;
+            return `${authorsStr}. ${title}. ${journal}, ${year}.`;
     }
 };
 
@@ -45,6 +92,5 @@ export const generateContextEntry = (paper: SearchResult, style: CitationStyle, 
         ? `[Ref (已存 ID:${existingId})]` 
         : `[Ref (新增)]`;
     
-    // We strictly append the full citation format so the AI sees exactly what to put in the Bibliography
-    return `${prefix} ${citation}\n【摘要/Abstract】: ${paper.abstract}\n【引用格式/Format】: ${style}\n\n`;
+    return `${prefix} ${citation}\n【摘要】: ${paper.abstract}\n【DOI】: ${paper.doi || 'N/A'}\n\n`;
 };

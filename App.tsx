@@ -1,6 +1,3 @@
-
-
-
 import React, { useState, useEffect } from 'react';
 import { Step, FormatRules, ThesisStructure, Chapter, Reference, ProjectState, ApiSettings, UsageStats, AgentLog, TokenUsage, SearchHistoryItem, TechnicalTerm } from './types';
 import { parseWordXML, generateThesisXML } from './services/xmlParser';
@@ -59,7 +56,7 @@ const App: React.FC = () => {
     return saved ? JSON.parse(saved) : {
       apiKey: defaultKey,
       baseUrl: "",
-      modelName: "gemini-3-pro-preview"
+      modelName: "gemini-2.0-flash"
     };
   });
 

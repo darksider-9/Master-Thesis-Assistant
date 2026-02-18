@@ -1,15 +1,4 @@
 
-
-
-
-
-
-
-
-
-
-
-
 import React, { useState, useRef, useEffect } from 'react';
 import { ThesisStructure, Chapter, FormatRules, Reference, AgentLog, ApiSettings, SectionPlan, SearchProvider, SearchResult, SearchHistoryItem, CitationStyle, SkeletonBlock, CitationStrategy, TechnicalTerm } from '../types';
 import { writeSingleSection, writeSingleSectionQuickMode, runPostProcessingAgents, generateSkeletonPlan, polishDraftContent, finalizeAcademicStyle, filterSearchResultsAI, standardizeReferencesGlobal } from '../services/geminiService';
@@ -203,6 +192,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       }
   };
 
+  // UPGRADED: Manual Add Citation with Enrichment
   const addCitationToContext = async (blockId: string, nodeId: string, result: SearchResult) => {
       if (isAddingRef) return;
       setIsAddingRef(true);
@@ -216,21 +206,24 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       );
 
       // 2. IMPORTANT: If not found, register it. 
-      // NEW: Fetch Detailed Metadata first!
+      // NEW: Use enrichReferenceMetadata (OpenAlex+Crossref) for better quality
       if (!existingRef) {
-          addLog('Reference', `正在通过 Crossref 补全 "${result.title}" 的详细元数据...`, 'processing');
+          addLog('Reference', `正在全网聚合 "${result.title.slice(0, 15)}..." 的详细元数据...`, 'processing');
           
-          let meta = await fetchDetailedRefMetadata(result.title);
+          // Use Strict Mode (True) because we know the title from the selected paper
+          let meta = await enrichReferenceMetadata(result.title, apiSettings, true);
           
-          // Fallback if Crossref fails, use basic info from SearchResult
+          // Fallback if enrichment fails, use basic info from SearchResult
           if (!meta) {
-              addLog('Reference', `Crossref 未找到匹配，使用基础信息回退。`, 'warning');
+              addLog('Reference', `元数据聚合未命中，使用基础信息回退。`, 'warning');
               meta = {
                   title: result.title,
                   authors: result.authors,
                   year: result.year,
                   journal: result.venue
               };
+          } else {
+               addLog('Reference', `成功获取详细元数据 (Volume/Issue/DOI)！`, 'success');
           }
 
           const formattedDesc = formatCitation(result, citationStyle); // Initial format for display
@@ -244,7 +237,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
           
           setReferences(prev => [...prev, newRef]);
           existingRef = newRef;
-          addLog('Reference', `已存入文献 [${newId}] (包含结构化元数据)`, 'success');
+      } else {
+          addLog('Reference', `引用已存在 [Ref:${existingRef.id}]，复用之。`, 'success');
       }
 
       // 3. Update the Context Textbox with the entry (showing ID for reuse)
@@ -255,25 +249,76 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       setIsAddingRef(false);
   };
 
-  // --- STANDARD REFERENCE FIXER (UPDATED to use new dedicated function) ---
+  // --- ENHANCED: STANDARD REFERENCE FIXER (Auto-Sync + Format) ---
   const handleFixReferences = async () => {
       if (isPostProcessing) return;
       setIsPostProcessing(true);
-      addLog('Reference', '开始执行“智能参考文献规范化”流程...', 'processing');
-      // Updated to pass thesis.chapters for context
-      addLog('Reference', '1. 全局检查：扫描正文引用上下文 & 缺失元数据...', 'processing');
-      
+      addLog('Reference', '启动智能参考文献规范化流程...', 'processing');
+
       try {
-          const updatedRefs = await standardizeReferencesGlobal(
-              references,
-              thesis.chapters, // Pass all chapters to find context
+          // STEP 1: Pre-flight Sync (Check for Quick Mode Placeholders)
+          // Scan all text for [[REF:KEYWORD_PLACEHOLDER:...]]
+          let hasNewSyncs = false;
+          let tempRefs = [...references];
+          let nextId = tempRefs.length > 0 ? Math.max(...tempRefs.map(r => r.id)) + 1 : 1;
+          
+          // Helper to process text and register refs
+          const processTextSync = (text: string): string => {
+             return text.replace(/\[\[REF:KEYWORD_PLACEHOLDER:(.*?)\]\]/g, (match, desc) => {
+                 const keyword = desc.trim();
+                 if (!keyword) return match;
+                 
+                 // Check exists
+                 let existing = tempRefs.find(r => r.description.includes(keyword) || keyword.includes(r.description));
+                 if (!existing) {
+                     // Register new
+                     existing = {
+                         id: nextId++,
+                         description: keyword,
+                         placeholder: match
+                     };
+                     tempRefs.push(existing);
+                     hasNewSyncs = true;
+                     // Log implicitly
+                 }
+                 return `[[REF:${existing.id}]]`;
+             });
+          };
+
+          // Recursively update all chapters (Sync Placeholders -> IDs)
+          const syncChaptersRecursive = (list: Chapter[]): Chapter[] => {
+              return list.map(ch => ({
+                  ...ch,
+                  content: ch.content ? processTextSync(ch.content) : undefined,
+                  subsections: ch.subsections ? syncChaptersRecursive(ch.subsections) : []
+              }));
+          };
+
+          const syncedChapters = syncChaptersRecursive(thesis.chapters);
+
+          if (hasNewSyncs) {
+               addLog('Reference', `检测到快速模式产生的临时引用，已自动注册 ${tempRefs.length - references.length} 条新文献。`, 'success');
+               // Update state immediately so standardize sees the IDs
+               setThesis(prev => ({ ...prev, chapters: syncedChapters }));
+               setReferences(tempRefs);
+               // Wait a tick for state to settle? No need, we pass vars to next function.
+          }
+
+          // STEP 2: Run Standardization (Search & Format)
+          addLog('Reference', '执行全局元数据补全与格式统一...', 'processing');
+          
+          // Use the *updated* lists (syncedChapters/tempRefs) to ensure context is correct
+          const standardizedRefs = await standardizeReferencesGlobal(
+              tempRefs,
+              syncedChapters, // Pass synced chapters so context lookup works for new IDs
               apiSettings,
               citationStyle,
               (msg) => addLog('Reference', msg, 'processing')
           );
         
-        setReferences(updatedRefs);
-        addLog('Reference', '参考文献规范化完成，已更新描述与格式。', 'success');
+        setReferences(standardizedRefs);
+        addLog('Reference', '参考文献规范化完成！', 'success');
+
       } catch (e) {
           addLog('Reference', `规范化失败: ${e}`, 'error');
       } finally {
@@ -289,12 +334,6 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       }
       
       setIsAutoPiloting(true);
-      
-      // LOGIC FIX: Resolve ambiguity for "Single Section" logic
-      // If targetNodeId is present (clicked on card), use it.
-      // If undefined (clicked on header):
-      //    - If scope is 'chapter', use all leaf nodes.
-      //    - If scope is 'section', find the FIRST pending/unwritten node in the chapter and run on that.
       
       let targetNodes: FlattenedNode[] = [];
       const leafNodes = nodes.filter(n => (n.chapter.subsections === undefined || n.chapter.subsections.length === 0));
@@ -784,6 +823,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       }));
 
       addLog('Writer', `✅ ${node.label} 快速撰写完成 (已生成关键词引用占位)`, 'success');
+      // Added User Hint per request
+      addLog('Supervisor', '💡 提示：快速模式生成的引用仅为占位符。您可以直接点击【规范参考文献】或【完成本章】来自动补全元数据。', 'warning');
 
     } catch (e) {
       addLog('Writer', `❌ ${node.label} 失败: ${e}`, 'warning');
@@ -976,7 +1017,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                     onClick={handleFixReferences}
                     disabled={isPostProcessing}
                     className="bg-orange-50 hover:bg-orange-100 text-orange-700 border border-orange-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm"
-                    title="强制搜索元数据并规范化所有引用格式"
+                    title="自动扫描正文引用、补全元数据并规范化格式"
                 >
                     {isPostProcessing ? '...' : `🏷️ 规范参考文献 (${citationStyle})`}
                 </button>

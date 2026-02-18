@@ -1,6 +1,3 @@
-
-
-
 import React, { useState, useEffect } from 'react';
 import { ApiSettings, UsageStats } from '../types';
 import { testApiConnection } from '../services/geminiService';
@@ -33,7 +30,7 @@ const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onClose, se
       setFormData({
           apiKey: defaultKey,
           baseUrl: '',
-          modelName: 'gemini-3-pro-preview'
+          modelName: 'gemini-2.0-flash'
       });
   };
 
@@ -111,12 +108,12 @@ const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onClose, se
                         <input 
                         type="text" 
                         className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none font-mono"
-                        placeholder="gemini-3-pro-preview"
+                        placeholder="gemini-2.0-flash"
                         value={formData.modelName}
                         onChange={e => setFormData({...formData, modelName: e.target.value})}
                         />
                         <div className="flex gap-2 mt-2 flex-wrap">
-                            {['gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-flash-preview'].map(m => (
+                            {['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'].map(m => (
                                 <button 
                                     key={m}
                                     onClick={() => setFormData({...formData, modelName: m})}

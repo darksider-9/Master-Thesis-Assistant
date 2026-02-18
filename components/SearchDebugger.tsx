@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { ApiSettings, Reference, SearchResult, CitationStyle } from '../types';
+import { ApiSettings, Reference, SearchResult, CitationStyle, Chapter } from '../types';
 import { searchAcademicPapers, enrichReferenceMetadata } from '../services/searchService';
 import { filterSearchResultsAI, standardizeReferencesGlobal } from '../services/geminiService';
 import { formatCitation } from '../utils/citationFormatter';
@@ -32,7 +32,6 @@ const SearchDebugger: React.FC<SearchDebuggerProps> = ({ isOpen, onClose, apiSet
 
     const addLog = (title: string, status: LogStep['status'] = 'pending', data?: any, summary?: string) => {
         setLogs(prev => {
-            // If checking for existing pending step to update? Simple append for now
             return [...prev, { id: Date.now(), title, status, data, summary }];
         });
     };
@@ -97,35 +96,56 @@ const SearchDebugger: React.FC<SearchDebuggerProps> = ({ isOpen, onClose, apiSet
                 };
 
                 enrichedRefs.push({
-                    id: -1, // Temp ID
+                    id: -1, // Temp ID, will be reassigned later
                     description: formatCitation(paper, citationStyle), // Rough initial format
                     metadata: finalMeta
                 });
             }
             updateLastLog('success', enrichedRefs, `已生成 ${enrichedRefs.length} 个待格式化对象 (包含详细元数据)`);
 
-            // STEP 4: AI Formatting (The Standardizer)
-            addLog(`4. 生成最终引用格式 (${citationStyle})`);
+            // STEP 4: AI Formatting (The Standardizer) - CRITICAL: Calling the EXACT SAME function as the main app
+            addLog(`4. 调用全局标准生成器 (${citationStyle})`);
             
-            // We mock a list of refs to pass to the agent
+            // We mock a list of refs with valid temporary IDs to pass to the agent
             const mockGlobalRefs = enrichedRefs.map((r, i) => ({ ...r, id: 9000 + i }));
             
-            // Re-use the global standardizer logic essentially
-            // Note: standardizeReferencesGlobal takes a list of refs and updates their description
-            // We pass an empty chapter list because we don't have context context in this debug view, 
-            // but the agent primarily uses metadata if available.
+            // We create a "Mock Chapter" containing the user's debug context.
+            // This ensures that if standardizeReferencesGlobal tries to find context for the refs, 
+            // it sees the text you entered in the debugger.
+            const mockChapters: Chapter[] = [{
+                id: 'debug_chapter',
+                title: 'Debug Context',
+                level: 1,
+                content: context, // Inject the context here so the standardizer can "see" it if it needs to plan searches
+                subsections: []
+            }];
+
+            // Log callback to visualize internal steps of the standardizer
+            const internalLogs: string[] = [];
+            const logWrapper = (msg: string) => internalLogs.push(msg);
+
             const standardizedRefs = await standardizeReferencesGlobal(
                 mockGlobalRefs, 
-                [], // No chapters context for this standalone debug
+                mockChapters, // Pass mock context
                 apiSettings, 
                 citationStyle,
-                (msg) => console.log(msg) 
+                logWrapper 
             );
 
-            updateLastLog('success', standardizedRefs, "格式化完成");
+            // Show internal logs from the standardizer service
+            updateLastLog('success', standardizedRefs, `标准器内部日志:\n${internalLogs.join('\n')}`);
 
-            // STEP 5: Add to Global List
-            if (window.confirm(`调试成功！生成了 ${standardizedRefs.length} 条引用。\n\n是否将它们添加到您的正式参考文献列表中？`)) {
+            // STEP 5: Final Preview (New)
+            addLog(`5. 最终参考文献格式预览 (Final Output)`);
+            // Extract the formatted strings (description field) for easy viewing
+            const previewOutput = standardizedRefs.map(r => r.description);
+            updateLastLog('success', previewOutput, "这是 AI 最终生成的标准格式，请仔细核对。");
+
+            // Small delay to ensure UI updates and logs render before alert blocks the thread
+            await new Promise(r => setTimeout(r, 500));
+
+            // STEP 6: Add to Global List (Confirmation)
+            if (window.confirm(`调试成功！\n\n请确认 Step 5 中的格式是否准确？\n\n点击【确定】将这 ${standardizedRefs.length} 条引用添加到您的正式参考文献列表中。`)) {
                 setReferences(prev => {
                     const nextId = prev.length > 0 ? Math.max(...prev.map(r => r.id)) + 1 : 1;
                     const newRefs = standardizedRefs.map((r, i) => ({
@@ -218,7 +238,7 @@ const SearchDebugger: React.FC<SearchDebuggerProps> = ({ isOpen, onClose, apiSet
                                     </div>
 
                                     {step.summary && (
-                                        <div className="text-xs text-slate-500 mb-2 font-medium bg-slate-50 p-1.5 rounded inline-block">
+                                        <div className="text-xs text-slate-500 mb-2 font-medium bg-slate-50 p-1.5 rounded inline-block whitespace-pre-wrap">
                                             {step.summary}
                                         </div>
                                     )}
