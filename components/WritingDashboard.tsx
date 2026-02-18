@@ -995,25 +995,6 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
             
             <div className="flex items-center gap-3">
                 <button 
-                    onClick={() => setIsTermManagerOpen(true)}
-                    className="bg-teal-50 hover:bg-teal-100 text-teal-700 border border-teal-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm flex items-center gap-1"
-                    title="管理全局术语表"
-                >
-                    📚 术语表 ({globalTerms.length})
-                </button>
-                <button 
-                    onClick={() => setIsDebuggerOpen(true)}
-                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors border border-slate-200 flex items-center gap-1"
-                >
-                    🐞 搜索调试
-                </button>
-                <button 
-                    onClick={() => setIsHistoryOpen(true)}
-                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors border border-slate-200"
-                >
-                    📜 搜索历史
-                </button>
-                <button 
                     onClick={handleFixReferences}
                     disabled={isPostProcessing}
                     className="bg-orange-50 hover:bg-orange-100 text-orange-700 border border-orange-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm"
@@ -1404,6 +1385,35 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       </div>
 
       <div className="w-72 flex flex-col gap-4 shrink-0">
+              {/* Tools Section */}
+        <div className="bg-white rounded-xl border shadow-sm p-3">
+            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">辅助工具</div>
+            <div className="space-y-2">
+                <button 
+                    onClick={() => setIsTermManagerOpen(true)}
+                    className="w-full flex items-center justify-between bg-teal-50 hover:bg-teal-100 text-teal-700 border border-teal-200 px-3 py-2 rounded-lg text-xs font-bold transition-colors"
+                >
+                    <div className="flex items-center gap-2"><span>📚</span> 全局术语表</div>
+                    <span className="bg-white px-1.5 rounded-full text-[10px] border border-teal-100">{globalTerms.length}</span>
+                </button>
+                <div className="grid grid-cols-2 gap-2">
+                    <button 
+                        onClick={() => setIsDebuggerOpen(true)}
+                        className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-2 py-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1"
+                        title="搜索调试"
+                    >
+                        <span>🐞</span> 调试
+                    </button>
+                    <button 
+                        onClick={() => setIsHistoryOpen(true)}
+                        className="bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 px-2 py-2 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1"
+                        title="搜索历史"
+                    >
+                        <span>📜</span> 历史
+                    </button>
+                </div>
+            </div>
+        </div>
         <div className="bg-slate-900 text-slate-300 rounded-xl flex-1 flex flex-col overflow-hidden shadow-xl">
           <div className="p-3 bg-black/40 border-b border-slate-700 font-mono text-xs flex justify-between">
              <span>AGENT_LOGS</span>
