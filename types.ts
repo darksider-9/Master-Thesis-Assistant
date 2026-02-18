@@ -1,5 +1,6 @@
 
 
+
 export interface ReferenceMetadata {
   title: string;
   authors: string[];
@@ -28,9 +29,10 @@ export interface ChatMessage {
 }
 
 export interface TechnicalTerm {
-  term: string;
-  fullName: string;
-  acronym: string;
+  term: string; // Chinese Full Name (e.g. 生成对抗网络)
+  englishName?: string; // English Full Name (e.g. Generative Adversarial Networks)
+  acronym: string; // Acronym (e.g. GAN)
+  firstOccurrenceBlockId?: string; // ID of the chapter/node where it was FIRST defined
 }
 
 export interface InterviewData {
@@ -201,7 +203,8 @@ export interface ProjectState {
   apiSettings?: Omit<ApiSettings, 'onUsage'>;
   agentLogs: AgentLog[];
   usageStats: UsageStats;
-  searchHistory: SearchHistoryItem[]; // New: Persist search history
+  searchHistory: SearchHistoryItem[];
+  globalTerms: TechnicalTerm[]; // NEW: Persist global terms
 }
 
 // --- Style Configuration Types ---

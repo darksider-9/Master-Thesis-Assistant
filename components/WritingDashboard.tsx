@@ -3,13 +3,21 @@
 
 
 
+
+
+
+
+
+
+
 import React, { useState, useRef, useEffect } from 'react';
-import { ThesisStructure, Chapter, FormatRules, Reference, AgentLog, ApiSettings, SectionPlan, SearchProvider, SearchResult, SearchHistoryItem, CitationStyle, SkeletonBlock, CitationStrategy } from '../types';
+import { ThesisStructure, Chapter, FormatRules, Reference, AgentLog, ApiSettings, SectionPlan, SearchProvider, SearchResult, SearchHistoryItem, CitationStyle, SkeletonBlock, CitationStrategy, TechnicalTerm } from '../types';
 import { writeSingleSection, writeSingleSectionQuickMode, runPostProcessingAgents, generateSkeletonPlan, polishDraftContent, finalizeAcademicStyle, filterSearchResultsAI, standardizeReferencesGlobal } from '../services/geminiService';
 import { searchAcademicPapers, fetchDetailedRefMetadata, enrichReferenceMetadata } from '../services/searchService';
 import { generateContextEntry, formatCitation } from '../utils/citationFormatter';
 import SearchHistoryModal from './SearchHistoryModal';
 import SearchDebugger from './SearchDebugger';
+import TermManagerModal from './TermManagerModal';
 
 interface WritingDashboardProps {
   thesis: ThesisStructure;
@@ -24,6 +32,8 @@ interface WritingDashboardProps {
   // New props for persistence
   searchHistory: SearchHistoryItem[];
   setSearchHistory: React.Dispatch<React.SetStateAction<SearchHistoryItem[]>>;
+  globalTerms: TechnicalTerm[]; // NEW Props
+  setGlobalTerms: React.Dispatch<React.SetStateAction<TechnicalTerm[]>>; // NEW Props
 }
 
 interface FlattenedNode {
@@ -57,7 +67,7 @@ const flattenChapters = (chapters: Chapter[], parentLabel: string = "", depth: n
   return nodes;
 };
 
-const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, formatRules, references, setReferences, apiSettings, setApiSettings, agentLogs, addLog, searchHistory, setSearchHistory }) => {
+const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, formatRules, references, setReferences, apiSettings, setApiSettings, agentLogs, addLog, searchHistory, setSearchHistory, globalTerms, setGlobalTerms }) => {
   const level1Chapters = thesis.chapters.filter(c => c.level === 1);
   const [selectedChapterId, setSelectedChapterId] = useState<string | null>(level1Chapters[0]?.id || null);
   const [loadingNodes, setLoadingNodes] = useState<Record<string, boolean>>({});
@@ -80,18 +90,14 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
   const [blockSearchResults, setBlockSearchResults] = useState<Record<string, SearchResult[]>>({});
   const [searchingBlockId, setSearchingBlockId] = useState<string | null>(null);
   
-  // History Modal State
+  // Modals
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
-  
-  // Debugger Modal State
   const [isDebuggerOpen, setIsDebuggerOpen] = useState(false);
+  const [isTermManagerOpen, setIsTermManagerOpen] = useState(false);
   
   // Auto Pilot State
   const [isAutoPiloting, setIsAutoPiloting] = useState(false);
   const [autoPilotScope, setAutoPilotScope] = useState<'section' | 'chapter'>('section'); // New granularity
-
-  // Global Terms Registry (In-memory for session)
-  const [globalTerms, setGlobalTerms] = useState<any[]>([]);
 
   const selectedChapter = thesis.chapters.find(c => c.id === selectedChapterId);
   // Calculate index of selected chapter in the whole thesis for numbering
@@ -521,7 +527,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                 discussionHistory: selectedChapter.chatHistory, 
                 fullChapterTree: thesis.chapters,
                 targetWordCount: targetWordCount,
-                chapterIndex: node.chapterIndex
+                chapterIndex: node.chapterIndex,
+                globalTerms: globalTerms // Pass Global Terms to Auto-Pilot Writer
               });
 
               // Polish & Finalize
@@ -697,7 +704,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
             discussionHistory: selectedChapter.chatHistory, 
             fullChapterTree: thesis.chapters,
             targetWordCount: targetWordCount,
-            chapterIndex: node.chapterIndex // Pass index for numbering
+            chapterIndex: node.chapterIndex, // Pass index for numbering
+            globalTerms: globalTerms // Pass Global Terms
           });
 
           // STEP 2: Logic Polish (With real-time numbering)
@@ -743,8 +751,6 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
       const userInstruction = getAIContext(node.chapter).userInstruction || "";
       
       // STEP 1: Draft using Quick Mode Prompt
-      // This allows the model to generate "hallucinated" reference placeholders like [[REF:Author Year Keywords]]
-      // It also checks globalRefs for strict ID reuse.
       let content = await writeSingleSectionQuickMode({
         thesisTitle: thesis.title,
         chapterLevel1: selectedChapter,
@@ -756,7 +762,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
         discussionHistory: selectedChapter.chatHistory, 
         fullChapterTree: thesis.chapters,
         targetWordCount: targetWordCount,
-        chapterIndex: node.chapterIndex // Pass index for numbering
+        chapterIndex: node.chapterIndex, // Pass index for numbering
+        globalTerms: globalTerms // Pass Global Terms to Quick Mode
       });
 
       // STEP 2: Logic Polish
@@ -804,7 +811,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
             chapterId: selectedChapter.id,
             allChapters: thesis.chapters,
             globalReferences: references,
-            globalTerms: globalTerms,
+            globalTerms: globalTerms, // Pass Global Terms to Service
             settings: apiSettings,
             onLog: (msg) => addLog('TermChecker', msg, 'processing')
         });
@@ -812,6 +819,7 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
         setThesis(prev => ({ ...prev, chapters: result.updatedChapters }));
         setReferences(result.updatedReferences);
         
+        // Update Global Terms State with results from AI
         setGlobalTerms(result.updatedTerms);
         
         addLog('Fixer', '章节校验与优化完成', 'success');
@@ -892,6 +900,13 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
           citationStyle={citationStyle}
       />
 
+      <TermManagerModal 
+          isOpen={isTermManagerOpen}
+          onClose={() => setIsTermManagerOpen(false)}
+          globalTerms={globalTerms}
+          setGlobalTerms={setGlobalTerms}
+      />
+
       <div className="w-60 bg-white rounded-xl border shadow-sm flex flex-col overflow-hidden shrink-0">
         <div className="p-4 bg-slate-50 border-b font-bold text-slate-700">章节目录</div>
         <div className="flex-1 overflow-y-auto p-2 space-y-2">
@@ -938,6 +953,13 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
             </div>
             
             <div className="flex items-center gap-3">
+                <button 
+                    onClick={() => setIsTermManagerOpen(true)}
+                    className="bg-teal-50 hover:bg-teal-100 text-teal-700 border border-teal-200 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm flex items-center gap-1"
+                    title="管理全局术语表"
+                >
+                    📚 术语表 ({globalTerms.length})
+                </button>
                 <button 
                     onClick={() => setIsDebuggerOpen(true)}
                     className="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors border border-slate-200 flex items-center gap-1"

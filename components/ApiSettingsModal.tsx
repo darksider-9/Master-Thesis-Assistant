@@ -1,6 +1,9 @@
 
+
+
 import React, { useState, useEffect } from 'react';
 import { ApiSettings, UsageStats } from '../types';
+import { testApiConnection } from '../services/geminiService';
 
 interface ApiSettingsModalProps {
   isOpen: boolean;
@@ -13,11 +16,14 @@ interface ApiSettingsModalProps {
 const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onClose, settings, onSave, usageStats }) => {
   const [formData, setFormData] = useState<ApiSettings>(settings);
   const [activeTab, setActiveTab] = useState<'config' | 'usage'>('config');
+  const [testResult, setTestResult] = useState<any>(null);
+  const [isTesting, setIsTesting] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       setFormData(settings);
       setActiveTab('config');
+      setTestResult(null);
     }
   }, [isOpen, settings]);
 
@@ -29,6 +35,19 @@ const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onClose, se
           baseUrl: '',
           modelName: 'gemini-3-pro-preview'
       });
+  };
+
+  const handleTest = async () => {
+      setIsTesting(true);
+      setTestResult(null);
+      try {
+          const res = await testApiConnection(formData);
+          setTestResult(res);
+      } catch (e) {
+          setTestResult({ error: String(e) });
+      } finally {
+          setIsTesting(false);
+      }
   };
 
   if (!isOpen) return null;
@@ -107,6 +126,26 @@ const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({ isOpen, onClose, se
                                 </button>
                             ))}
                         </div>
+                    </div>
+
+                    <div className="pt-4 border-t border-slate-100">
+                        <div className="flex justify-between items-center mb-2">
+                            <label className="text-xs font-bold text-slate-500">API 连接测试 (Test)</label>
+                            <button 
+                                onClick={handleTest} 
+                                disabled={isTesting}
+                                className="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded transition-colors flex items-center gap-1"
+                            >
+                                {isTesting ? <span className="animate-spin">⏳</span> : '🧪 发送测试'}
+                            </button>
+                        </div>
+                        {testResult && (
+                            <div className="bg-slate-900 rounded-lg p-3 overflow-x-auto max-h-40 border border-slate-700">
+                                <pre className="text-[10px] font-mono text-green-400 leading-tight">
+                                    {JSON.stringify(testResult, null, 2)}
+                                </pre>
+                            </div>
+                        )}
                     </div>
                  </div>
             ) : (

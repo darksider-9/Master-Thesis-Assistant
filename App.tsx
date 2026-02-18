@@ -1,6 +1,8 @@
 
+
+
 import React, { useState, useEffect } from 'react';
-import { Step, FormatRules, ThesisStructure, Chapter, Reference, ProjectState, ApiSettings, UsageStats, AgentLog, TokenUsage, SearchHistoryItem } from './types';
+import { Step, FormatRules, ThesisStructure, Chapter, Reference, ProjectState, ApiSettings, UsageStats, AgentLog, TokenUsage, SearchHistoryItem, TechnicalTerm } from './types';
 import { parseWordXML, generateThesisXML } from './services/xmlParser';
 import { analyzeImportedStructure, reverseEngineerMetadata } from './services/geminiService'; // Import new services
 import Sidebar from './components/Sidebar';
@@ -36,7 +38,8 @@ const App: React.FC = () => {
   // Global Persistence State
   const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
   const [usageStats, setUsageStats] = useState<UsageStats>(INITIAL_USAGE);
-  const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>([]); // New: Search History
+  const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>([]);
+  const [globalTerms, setGlobalTerms] = useState<TechnicalTerm[]>([]); // New: Global Terms Persistence
 
   // API Settings State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -260,7 +263,7 @@ const App: React.FC = () => {
   // --- Project Persistence ---
   const handleSaveProject = () => {
     const state: ProjectState = {
-      version: "1.2", // Bump version for search history support
+      version: "1.3", // Bump version for global terms support
       timestamp: Date.now(),
       step: currentStep,
       thesis,
@@ -276,7 +279,8 @@ const App: React.FC = () => {
       },
       agentLogs,
       usageStats,
-      searchHistory // Save history
+      searchHistory,
+      globalTerms // Save Global Terms
     };
     const json = JSON.stringify(state, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
@@ -304,7 +308,8 @@ const App: React.FC = () => {
         if (state.step) setCurrentStep(state.step);
         if (state.agentLogs) setAgentLogs(state.agentLogs);
         if (state.usageStats) setUsageStats(state.usageStats);
-        if (state.searchHistory) setSearchHistory(state.searchHistory); // Restore history
+        if (state.searchHistory) setSearchHistory(state.searchHistory);
+        if (state.globalTerms) setGlobalTerms(state.globalTerms); // Restore Terms
         
         // Restore API Settings if they exist in the file
         if (state.apiSettings) {
@@ -370,7 +375,7 @@ const App: React.FC = () => {
               onUpload={handleFileUpload} 
               formatRules={formatRules}
               onNext={() => setCurrentStep('title')}
-              onImportExisting={handleThesisImport} // Pass import handler
+              onImportExisting={handleThesisImport}
             />
           )}
 
@@ -408,11 +413,13 @@ const App: React.FC = () => {
               references={references}
               setReferences={setReferences}
               apiSettings={settingsWithCallback}
-              setApiSettings={setApiSettings} // Pass setter for search key persistence
+              setApiSettings={setApiSettings}
               agentLogs={agentLogs}
               addLog={addAgentLog}
               searchHistory={searchHistory}
               setSearchHistory={setSearchHistory}
+              globalTerms={globalTerms} // Pass Global Terms
+              setGlobalTerms={setGlobalTerms} // Pass Setter
             />
           )}
 

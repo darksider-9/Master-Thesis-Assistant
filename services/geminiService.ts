@@ -1,6 +1,3 @@
-
-
-
 import { GoogleGenAI } from "@google/genai";
 import { Chapter, FormatRules, TechnicalTerm, Reference, ChatMessage, InterviewData, ApiSettings, ThesisStructure, SkeletonResponse, SearchResult, CitationStyle } from "../types";
 import { fetchDetailedRefMetadata, searchAcademicPapers, enrichReferenceMetadata } from "./searchService";
@@ -230,14 +227,44 @@ const generateContentUnified = async (
                 payload.response_format = { type: "json_object" };
             }
 
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${settings.apiKey}`
-                },
-                body: JSON.stringify(payload)
-            });
+            // Define fetcher to allow retry
+            const makeFetch = async (p: any) => {
+                return fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${settings.apiKey}`
+                    },
+                    body: JSON.stringify(p)
+                });
+            };
+
+            let response = await makeFetch(payload);
+
+            // --- Fallback Logic for models not supporting json_object ---
+            if (!response.ok && req.jsonMode) {
+                // Determine if error is related to response_format
+                // We need to read the error text to check, but this consumes the stream.
+                // Since we are in an error state, it's fine.
+                const errText = await response.text();
+                
+                const isJsonFormatError = response.status === 400 && (
+                    errText.includes("response_format") || 
+                    errText.includes("json_object") || 
+                    errText.includes("InvalidParameter") ||
+                    errText.includes("not supported")
+                );
+
+                if (isJsonFormatError) {
+                    console.warn("⚠️ API Warning: Model does not support response_format: json_object. Retrying without strict JSON mode.");
+                    delete payload.response_format;
+                    // Retry
+                    response = await makeFetch(payload);
+                } else {
+                    // Throw original error
+                    throw new Error(`OpenAI API Error (${response.status}): ${errText}`);
+                }
+            }
 
             if (!response.ok) {
                 const errText = await response.text();
@@ -305,6 +332,67 @@ const generateContentUnified = async (
         } catch (e) {
              console.error("Google GenAI Call Failed", e);
              throw e;
+        }
+    }
+};
+
+// --- API Connection Test Function ---
+export const testApiConnection = async (settings: ApiSettings): Promise<any> => {
+    const testPrompt = "Hello, this is a connectivity test.";
+    
+    // CASE A: OpenAI Compatible (Custom Base URL)
+    if (settings.baseUrl && settings.baseUrl.trim() !== "") {
+        try {
+            let url = settings.baseUrl.trim();
+            if (url.endsWith('/')) url = url.slice(0, -1);
+            // Heuristic for appending endpoint
+            if (!url.endsWith('/chat/completions')) {
+                if (url.endsWith('/v1')) {
+                    url = `${url}/chat/completions`;
+                } else {
+                    url = `${url}/chat/completions`; // Assume standard openai-like
+                }
+            }
+
+            const payload = {
+                model: settings.modelName,
+                messages: [
+                    { role: "user", content: testPrompt }
+                ],
+                stream: false
+            };
+
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${settings.apiKey}`
+                },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await response.json();
+            return {
+                status: response.status,
+                url: url,
+                data: data
+            };
+
+        } catch (e) {
+            return { error: e instanceof Error ? e.message : String(e), stack: e instanceof Error ? e.stack : undefined };
+        }
+    } 
+    // CASE B: Official Google GenAI SDK
+    else {
+        const ai = new GoogleGenAI({ apiKey: settings.apiKey });
+        try {
+            const res = await ai.models.generateContent({
+                model: settings.modelName,
+                contents: testPrompt,
+            });
+            return res;
+        } catch (e) {
+             return { error: e instanceof Error ? e.message : String(e), stack: e instanceof Error ? e.stack : undefined };
         }
     }
 };
@@ -694,11 +782,12 @@ export interface WriteSectionContext {
   fullChapterTree?: Chapter[]; // New: Full outline context for Smart Write
   targetWordCount?: number; // New: Constraint for word count
   chapterIndex: number; // New: For numbering
+  globalTerms: TechnicalTerm[]; // NEW: Inject global terms
 }
 
 // --- NEW: Quick Mode Writer (Allows Hallucinated Refs with strict placeholders) ---
 export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
-  const { thesisTitle, chapterLevel1, targetSection, userInstructions, settings, discussionHistory, fullChapterTree, globalRefs, targetWordCount, chapterIndex } = ctx;
+  const { thesisTitle, chapterLevel1, targetSection, userInstructions, settings, discussionHistory, fullChapterTree, globalRefs, targetWordCount, chapterIndex, globalTerms } = ctx;
 
   const structureContext = fullChapterTree 
       ? JSON.stringify(fullChapterTree.map(c => ({ title: c.title, subsections: c.subsections?.map(s => s.title) })), null, 2)
@@ -706,6 +795,12 @@ export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
 
   // Existing refs for reuse check
   const globalRefStr = globalRefs.map(r => `[RefID: ${r.id}] ${r.description}`).join("\n");
+
+  // Format Global Terms for Proactive Consistency
+  // We provide the list and instruct the AI to use acronyms for these.
+  const knownTermsStr = globalTerms.length > 0 
+      ? globalTerms.map(t => `${t.term} (${t.acronym})`).join(", ")
+      : "(暂无已定义的术语)";
 
   const wordCountInstruction = targetWordCount 
       ? `【重要字数要求】本节内容的生成长度**必须**至少达到 ${targetWordCount} 字。`
@@ -757,6 +852,15 @@ export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
     2. **严禁嵌套标题**：请直接输出正文段落，**绝对禁止**在回复中自己生成下一级的小标题（例如：不要在 2.1 节里自己编造 2.1.1 标题）。保持平铺直叙。
     3. **只写正文**：不要重复打印当前章节的标题。
 
+    【专业术语与翻译名词规范 (CRITICAL)】
+    1. **全局已知术语 (Known Terms)**：以下术语在文中**已经定义过**，请在撰写时**直接使用英文缩写**，严禁再次使用全称定义格式。
+       - 已知列表: ${knownTermsStr}
+    2. **新术语 (New Terms)**：对于不在上述列表中的专业术语：
+       - **专业术语** (具有行业公认英文缩写): 首次出现必须使用“中文全称 (英文全称, 英文缩写)”格式。
+         * 例如：“生成对抗网络 (Generative Adversarial Networks, GAN)”。
+       - **普通翻译名词** (无特定缩写): 直接使用中文，**禁止**强行编造缩写或附带英文。
+    3. 确保缩写在当前章节内的上下文一致性。
+
     【参考文献引用规则 (Citation Logic - CRITICAL)】
     由于你没有外部 Context，请遵循以下**混合引用策略**：
     
@@ -783,16 +887,6 @@ export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
 
     【全局参考文献库 (Global References)】
     ${globalRefStr || "(暂无全局文献)"}
-
-    【专业术语与翻译名词规范 (CRITICAL)】
-    1. **严格区分“专业术语”与“普通翻译名词”**：
-       - **专业术语** (具有行业公认英文缩写): 首次出现必须使用“中文全称 (英文全称, 英文缩写)”格式。
-         * 例如：“生成对抗网络 (Generative Adversarial Networks, GAN)”。
-         * 后续直接使用缩写 (如 "GAN")。
-       - **普通翻译名词** (无特定缩写): 直接使用中文，**禁止**强行编造缩写或附带英文。
-         * 例如：“生成器”直接写“生成器”，**不要**写“生成器 (Generator, G)”。
-         * 例如：“损失函数”直接写“损失函数”，**不要**写“损失函数 (Loss Function)”。
-    2. 确保缩写在当前章节内的上下文一致性。
 
     【格式占位符规范】
     1. **只输出正文**，不要输出章节标题。
@@ -824,7 +918,7 @@ export const writeSingleSectionQuickMode = async (ctx: WriteSectionContext) => {
 
 
 export const writeSingleSection = async (ctx: WriteSectionContext) => {
-  const { thesisTitle, chapterLevel1, targetSection, userInstructions, settings, discussionHistory, fullChapterTree, globalRefs, targetWordCount, chapterIndex } = ctx;
+  const { thesisTitle, chapterLevel1, targetSection, userInstructions, settings, discussionHistory, fullChapterTree, globalRefs, targetWordCount, chapterIndex, globalTerms } = ctx;
 
   const isLevel1 = targetSection.level === 1;
 
@@ -847,6 +941,11 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
 
   // Format Global References for Reuse
   const globalRefStr = globalRefs.map(r => `[RefID: ${r.id}] ${r.description}`).join("\n");
+
+  // Format Global Terms for Proactive Consistency
+  const knownTermsStr = globalTerms.length > 0 
+      ? globalTerms.map(t => `${t.term} (${t.acronym})`).join(", ")
+      : "(暂无已定义的术语)";
 
   const wordCountInstruction = targetWordCount 
       ? `【重要字数要求】本节内容的生成长度**必须**至少达到 ${targetWordCount} 字。请务必深入展开每一个逻辑点，提供详尽的分析、推导或描述，严禁简略带过。`
@@ -902,6 +1001,15 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
     ${metadataContext || "(无特殊元数据)"}
     ${visualPlanContext || ""}
 
+    【专业术语与翻译名词规范 (CRITICAL)】
+    1. **全局已知术语 (Known Terms)**：以下术语在文中**已经定义过**，请在撰写时**直接使用英文缩写**，严禁再次使用全称定义格式。
+       - 已知列表: ${knownTermsStr}
+    2. **新术语 (New Terms)**：对于不在上述列表中的专业术语：
+       - **专业术语** (具有行业公认英文缩写): 首次出现必须使用“中文全称 (英文全称, 英文缩写)”格式。
+         * 例如：“生成对抗网络 (Generative Adversarial Networks, GAN)”。
+       - **普通翻译名词** (无特定缩写): 直接使用中文，**禁止**强行编造缩写或附带英文。
+    3. 确保缩写在当前章节内的上下文一致性。
+
     【全局参考文献库 (Global References) - 严格引用规则】
     已存在列表:
     ${globalRefStr || "(暂无全局文献，请创建新引用)"}
@@ -921,16 +1029,6 @@ export const writeSingleSection = async (ctx: WriteSectionContext) => {
     1. **复用**: 只有确认颗粒度匹配时，使用 \`[[REF:ID]]\` (如 [[REF:12]])。
     2. **新增**: 如果库中没有匹配层级的文献，使用 \`[[REF:KEYWORD_PLACEHOLDER: 详细标题关键词]]\`。
     3. **多重引用**: 如果需要同时引用多个，请写成 \`[[REF:1]][[REF:2]]\`，**严禁**使用逗号合并如 \`[1,2]\`。
-
-    【专业术语与翻译名词规范 (CRITICAL)】
-    1. **严格区分“专业术语”与“普通翻译名词”**：
-       - **专业术语** (具有行业公认英文缩写): 首次出现必须使用“中文全称 (英文全称, 英文缩写)”格式。
-         * 例如：“生成对抗网络 (Generative Adversarial Networks, GAN)”。
-         * 后续直接使用缩写 (如 "GAN")。
-       - **普通翻译名词** (无特定缩写): 直接使用中文，**禁止**强行编造缩写或附带英文。
-         * 例如：“生成器”直接写“生成器”，**不要**写“生成器 (Generator, G)”。
-         * 例如：“损失函数”直接写“损失函数”，**不要**写“损失函数 (Loss Function)”。
-    2. 确保缩写在当前章节内的上下文一致性。
 
     【格式占位符规范】
     1. **只输出正文**，不要输出章节标题。
@@ -966,10 +1064,10 @@ interface PostProcessContext {
     chapterId: string;
     allChapters: Chapter[];
     globalReferences: Reference[];
-    globalTerms: TechnicalTerm[];
+    globalTerms: TechnicalTerm[]; // UPDATED TYPE
     settings: ApiSettings;
     onLog?: (msg: string) => void;
-    citationStyle?: CitationStyle; // NEW: Pass citation style for strict formatting
+    citationStyle?: CitationStyle;
 }
 
 interface PostProcessResult {
@@ -989,22 +1087,46 @@ const flattenChapters = (chapters: Chapter[]): Chapter[] => {
     return list;
 };
 
-// 1. Extraction Agent
-const extractTermsAI = async (text: string, settings: ApiSettings): Promise<TechnicalTerm[]> => {
+// 1. Extraction Agent (Updated for Fuzzy Semantic Matching)
+const extractTermsAI = async (text: string, globalTerms: TechnicalTerm[], settings: ApiSettings): Promise<any[]> => {
     if (!text || text.length < 50) return [];
     
+    // We pass the existing global terms to the LLM and ask it to classify matches.
+    const globalContext = JSON.stringify(globalTerms.map(t => ({ term: t.term, acronym: t.acronym })));
+
     const systemPrompt = `
-      You are a Technical Term Extraction Agent.
-      Analyze the provided text and identify "Professional Technical Terms" that are defined using the format "Full Name (Acronym)" or "Full Name (English)".
+      You are a Technical Term Extraction & Consistency Agent.
       
-      CRITICAL FILTERING RULES:
-      1. IGNORE figure/table citations like "Figure (1)", "Table (2)", "Eq. (3)".
-      2. IGNORE common parentheses like "shown in (a)", "note (see below)".
-      3. EXTRACT ONLY true domain-specific terms (e.g., "Convolutional Neural Networks (CNN)").
-      4. IGNORE generic translated nouns like "Generator (Generator)", "Loss (Loss)". Only extract terms that have a DISTINCT valid acronym used in the field.
+      【Task】
+      Analyze the provided text and identify "Professional Technical Terms".
+      Simultaneously, compare them against the provided "GLOBAL_KNOWN_TERMS" list to check for semantic matches (fuzzy matching).
       
-      Return JSON: { "terms": [ { "term": "中文全称", "acronym": "ACRONYM_OR_ENGLISH" } ] }
-      Return empty list if none found.
+      【Global Known Terms】
+      ${globalContext}
+      
+      【Extraction Rules】
+      1. IGNORE figure/table citations like "Figure (1)".
+      2. IGNORE generic nouns. Only extract terms that have a DISTINCT valid acronym.
+      3. Look for:
+         - Explicit definitions: "中文全称 (English Full Name, Acronym)"
+         - Usages of acronyms: "GAN", "CNNs"
+      
+      【Classification Logic (Critical)】
+      For each extracted term, determine its status:
+      - **"KNOWN"**: The term (or a semantic variant like "GANs" vs "GAN") ALREADY EXISTS in the Global List.
+      - **"NEW"**: The term is a new concept NOT found in the Global List.
+
+      【Output JSON】
+      { 
+        "terms": [ 
+            { 
+                "term": "生成对抗网络", 
+                "englishName": "Generative Adversarial Networks", 
+                "acronym": "GAN", 
+                "status": "KNOWN" // or "NEW"
+            } 
+        ] 
+      }
     `;
 
     try {
@@ -1030,11 +1152,11 @@ const rewriteContentAI = async (text: string, instructions: string, settings: Ap
       
       RULES:
       1. Keep the original meaning and core content.
-      2. ONLY modify the technical terms as requested in the instructions, OR improve flow based on the human-writing style guide.
+      2. ONLY modify the technical terms as requested in the instructions.
       3. Ensure the text flows naturally after modification.
       4. Preserve all special placeholders like [[FIG:...]], [[REF:...]], [[EQ:...]], [[SYM:...]].
       
-      INSTRUCTIONS FROM TERM CHECKER:
+      INSTRUCTIONS FROM TERM CHECKER (Global Consistency Rules):
       ${instructions}
     `;
 
@@ -1190,96 +1312,98 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
    
    
    // --- PHASE 1: AI TERM EXTRACTION (Current Chapter Only) ---
-   if (onLog) onLog(`正在扫描本章 ${currentChapterNodes.length} 个节点的专业术语...`);
+   if (onLog) onLog(`正在扫描本章 ${currentChapterNodes.length} 个节点的专业术语 (AI Semantic Check)...`);
    
    // We gather terms found in THIS chapter
-   const localTermsFound: { term: TechnicalTerm, nodeId: string }[] = [];
+   let chapterFullText = "";
+   currentChapterNodes.forEach(n => chapterFullText += (n.content || "") + "\n");
    
-   for (const node of currentChapterNodes) {
-       if (!node.content) continue;
-       const terms = await extractTermsAI(node.content, settings);
-       terms.forEach(t => {
-           localTermsFound.push({ 
-               term: { ...t, fullName: t.term }, 
-               nodeId: node.id 
-           });
-       });
-   }
+   // Call updated extraction which performs fuzzy semantic matching against global list
+   const extractedItems = await extractTermsAI(chapterFullText, ctx.globalTerms, settings);
 
-   // --- PHASE 2: GLOBAL INDEXING (Determine First Occurrence) ---
-   if (onLog) onLog("构建全书术语索引，计算首次出现位置...");
+   // --- PHASE 2: GLOBAL CONSISTENCY CHECK ---
+   if (onLog) onLog("比对全局术语表，生成一致性修正指令...");
+   
+   const updatedGlobalTerms = [...ctx.globalTerms];
+   const termDirectives: string[] = [];
+   const addedTerms: string[] = [];
 
-   // We need to know if these terms appear in EARLIER chapters (Pre-order).
-   const termDirectives: Record<string, 'use_full' | 'use_short'> = {}; // Key: NodeID + Acronym
-   const uniqueAcronyms = Array.from(new Set(localTermsFound.map(x => x.term.acronym.toUpperCase())));
+   // Algorithm:
+   // The Extractor has already classified terms as 'KNOWN' or 'NEW' based on semantics.
+   
+   for (const item of extractedItems) {
+       // Validate structure
+       if (!item.acronym || item.acronym.length < 2) continue;
 
-   // For each acronym found in this chapter, find its ABSOLUTE FIRST occurrence in the WHOLE book
-   uniqueAcronyms.forEach(acronym => {
-       const termObj = localTermsFound.find(x => x.term.acronym.toUpperCase() === acronym)?.term;
-       if (!termObj) return;
-
-       // Find the very first node in the ENTIRE book that mentions this acronym OR its full name
-       let firstGlobalNodeId = "";
-       
-       for (const node of flatAll) {
-           if (!node.content) continue;
-           const contentUpper = node.content.toUpperCase();
-           if (contentUpper.includes(acronym) || (termObj.fullName && node.content.includes(termObj.fullName))) {
-               firstGlobalNodeId = node.id;
-               break; // Found the first one
-           }
-       }
-
-       // Now decide for the CURRENT chapter nodes
-       currentChapterNodes.forEach((node: Chapter) => {
-           if (!node.content) return;
-           const hasTerm = node.content.toUpperCase().includes(acronym) || node.content.includes(termObj.fullName);
-           if (hasTerm) {
-               const key = `${node.id}||${acronym}`;
-               if (node.id === firstGlobalNodeId) {
-                   termDirectives[key] = 'use_full';
+       // CASE A: KNOWN TERM (Semantic Match Found by AI)
+       if (item.status === 'KNOWN') {
+           // We need to find *which* existing global term it matched.
+           // Since we don't have the ID returned by AI, we do a quick local lookup.
+           // We prioritize the existing global record over the new extraction.
+           const existing = updatedGlobalTerms.find(g => g.acronym.toLowerCase() === item.acronym.toLowerCase()) 
+                            || updatedGlobalTerms.find(g => g.term === item.term); // Fallback to Chinese
+           
+           if (existing) {
+               // Logic: It is already defined globally.
+               // Instruction: "Use Acronym directly."
+               // Exception: If the global term's origin is THIS chapter, treat as New (in case of re-run).
+               if (existing.firstOccurrenceBlockId && existing.firstOccurrenceBlockId.startsWith(chapterId)) {
+                    // It was originally defined here. So treat as New (Full Definition required).
+                    termDirectives.push(`- Term '${existing.acronym}': This term is defined in this chapter. Ensure the VERY FIRST mention in this text is '${existing.term} (${existing.englishName}, ${existing.acronym})'. All subsequent mentions MUST be '${existing.acronym}'.`);
                } else {
-                   termDirectives[key] = 'use_short';
+                    // It was defined elsewhere. Treat as Known.
+                    termDirectives.push(`- Term '${existing.acronym}': This is a GLOBALLY KNOWN term (defined in Chapter ${existing.firstOccurrenceBlockId || '?'}). Use '${existing.acronym}' directly. Do not redefine.`);
                }
            }
-       });
-   });
-
-   // --- PHASE 3: AI REWRITING (Apply Rules) ---
-   if (onLog) onLog("AI 正在根据全局规则重写不规范的段落...");
-
-   let rewrittenCount = 0;
-   
-   // We iterate current chapter nodes again to apply fixes
-   for (const node of currentChapterNodes) {
-       if (!node.content) continue;
-       
-       const nodeDirectives: string[] = [];
-       
-       uniqueAcronyms.forEach(acronym => {
-           const rule = termDirectives[`${node.id}||${acronym}`];
-           if (!rule) return;
-           
-           const termInfo = localTermsFound.find(t => t.term.acronym.toUpperCase() === acronym)?.term;
-           if (!termInfo) return;
-
-           if (rule === 'use_full') {
-               nodeDirectives.push(`- Term "${acronym}" is defined for the FIRST time here. Ensure it appears ONCE as "${termInfo.fullName} (${termInfo.acronym})". Do not use just "${acronym}" before defining it.`);
-           } else {
-               nodeDirectives.push(`- Term "${acronym}" has been defined previously. Replace instances of "${termInfo.fullName} (${termInfo.acronym})" or "${termInfo.fullName}" with just "${termInfo.acronym}".`);
+       } 
+       // CASE B: NEW TERM
+       else {
+           // Check strict duplicate just in case AI missed it
+           const strictDup = updatedGlobalTerms.some(g => g.acronym.toLowerCase() === item.acronym.toLowerCase());
+           if (!strictDup) {
+               const newTerm: TechnicalTerm = {
+                   term: item.term,
+                   englishName: item.englishName || item.term,
+                   acronym: item.acronym,
+                   firstOccurrenceBlockId: chapterId // Mark this chapter as origin
+               };
+               updatedGlobalTerms.push(newTerm);
+               addedTerms.push(item.acronym);
+               
+               termDirectives.push(`- Term '${item.acronym}': This is a NEW term. Ensure the VERY FIRST mention in this text is '${item.term} (${item.englishName}, ${item.acronym})'. All subsequent mentions MUST be '${item.acronym}'.`);
            }
-       });
-
-       if (nodeDirectives.length > 0) {
-           if (onLog) onLog(`  - 修正节点: ${node.title} ...`);
-           const newContent = await rewriteContentAI(node.content, nodeDirectives.join("\n"), settings);
-           node.content = newContent; // Update in place
-           rewrittenCount++;
        }
    }
-   
-   if (onLog) onLog(`术语一致性检查完成，AI 重写了 ${rewrittenCount} 个段落。`);
 
+   if (addedTerms.length > 0 && onLog) {
+       onLog(`新增全局术语: ${addedTerms.join(", ")}`);
+   }
+
+   // --- PHASE 3: AI REWRITING (Apply Rules) ---
+   if (termDirectives.length > 0) {
+        if (onLog) onLog("AI 正在根据全局规则重写不规范的段落...");
+        const directiveText = termDirectives.join("\n");
+        
+        let rewrittenCount = 0;
+        // We iterate current chapter nodes again to apply fixes
+        for (const node of currentChapterNodes) {
+            if (!node.content) continue;
+            
+            // Heuristic check to see if we need to call AI
+            const needsRewrite = extractedItems.some(t => 
+                node.content!.includes(t.acronym) || node.content!.includes(t.term)
+            );
+
+            if (needsRewrite) {
+                const newContent = await rewriteContentAI(node.content, directiveText, settings);
+                node.content = newContent; 
+                rewrittenCount++;
+            }
+        }
+        if (onLog) onLog(`术语一致性检查完成，AI 重写了 ${rewrittenCount} 个段落。`);
+   } else {
+       if (onLog) onLog("未发现需要修正的术语。");
+   }
 
    // --- PHASE 4: Reference & Formatting (Legacy Logic) ---
    // Maintain the global reference list. Only add new ones if they don't match existing descriptions.
@@ -1375,18 +1499,10 @@ export const runPostProcessingAgents = async (ctx: PostProcessContext): Promise<
    });
 
 
-   // Extract new global terms list for UI display
-   const finalGlobalTerms = [...ctx.globalTerms];
-   localTermsFound.forEach(lt => {
-       if (!finalGlobalTerms.find(gt => gt.acronym === lt.term.acronym)) {
-           finalGlobalTerms.push(lt.term);
-       }
-   });
-
    return {
        updatedText: "", 
        updatedReferences: finalRefOrder,
-       updatedTerms: finalGlobalTerms,
+       updatedTerms: updatedGlobalTerms, // Return updated global list
        updatedChapters: updatedChapters
    };
 };
