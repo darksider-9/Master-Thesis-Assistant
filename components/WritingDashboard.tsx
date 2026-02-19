@@ -1001,12 +1001,18 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
 
       <div className="flex-1 flex flex-col gap-4 min-w-0">
         <div className="min-h-14 bg-white rounded-xl border shadow-sm flex flex-col justify-center px-6 py-3 shrink-0 gap-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
+          <div className="flex flex-col gap-3 w-full">
+            {/* 第一行：章节标题 */}
+            <div className="flex items-center w-full">
                 <h2 className="font-bold text-lg text-slate-800 truncate">
                     智能撰写工作台 - {selectedChapter.title}
                 </h2>
-                <div className="flex bg-slate-100 p-1 rounded-lg">
+            </div>
+            
+            {/* 第二行：操作按钮栏 (模式切换 + 功能按钮 + 完成按钮) */}
+            <div className="flex items-center gap-3 flex-wrap w-full">
+                {/* 1. 模式切换器 */}
+                <div className="flex bg-slate-100 p-1 rounded-lg shrink-0">
                     <button 
                     onClick={() => setAdvancedMode(false)}
                     className={`px-3 py-1 rounded text-xs font-bold transition-all ${!advancedMode ? 'bg-white shadow text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}
@@ -1020,9 +1026,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                     🧬 高级模式 (骨架+搜索)
                     </button>
                 </div>
-            </div>
-            
-            <div className="flex items-center gap-3">
+
+                {/* 2. 规范参考文献 */}
                 <button 
                     onClick={handleFixReferences}
                     disabled={isPostProcessing}
@@ -1031,6 +1036,8 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                 >
                     {isPostProcessing ? '...' : `🏷️ 规范参考文献 (${citationStyle})`}
                 </button>
+
+                {/* 3. Auto-Pilot (高级模式才显示) */}
                 {advancedMode && (
                   <div className="flex items-center gap-1 bg-purple-50 p-1 rounded-lg border border-purple-100">
                       <select 
@@ -1051,10 +1058,12 @@ const WritingDashboard: React.FC<WritingDashboardProps> = ({ thesis, setThesis, 
                       </button>
                   </div>
                 )}
+
+                {/* 4. 完成本章 (使用 ml-auto 将其推到最右侧，保持整洁) */}
                 <button 
                     onClick={handleCompleteChapter}
                     disabled={isPostProcessing || isAutoPiloting}
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm flex items-center gap-2"
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm flex items-center gap-2 ml-auto"
                 >
                     {isPostProcessing ? '正在进行 AI 深度校验...' : '🎉 完成本章 & 校验'}
                 </button>
